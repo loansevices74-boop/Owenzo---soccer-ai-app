@@ -1,4 +1,4 @@
-# OWENZO Soccer AI Prediction Web App - v3 FINAL
+# Soccer AI Prediction Web App - v3 FINAL
 # Pipeline: fact-check fixtures -> deep team form analysis -> expected score -> mixed slips
 import math
 import re
