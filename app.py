@@ -1,5 +1,6 @@
-# Soccer AI Prediction Web App - v4 FINAL
-# Pipeline: fact-check fixtures -> deep team form analysis -> expected score -> mixed slips
+# Soccer AI Prediction Web App - v5 FINAL
+# Pipeline: fact-check -> deep team analysis (venue splits, shrinkage)
+#           -> Dixon-Coles score model -> expected score -> mixed slips
 import math
 import re
 import json
@@ -16,6 +17,15 @@ HOME_ADV = 65
 TOTAL_GOALS_BASE = 2.70
 DB_PATH = "soccer_tracker.db"
 FORM_CACHE_PATH = "form_cache.json"
+
+LEAGUE_GOALS = {
+    "Argentina": 2.40, "Ireland": 2.60, "USA": 2.90, "England": 2.75,
+    "Spain": 2.60, "Italy": 2.55, "Germany": 3.05, "Netherlands": 3.10,
+    "Norway": 3.15, "Sweden": 2.95, "Finland": 2.75, "Brazil": 2.55,
+    "Mexico": 2.70, "International Clubs": 2.70,
+}
+RHO = -0.07
+HOME_SHARE = 0.55
 
 ELO = {
     "Paris Saint-Germain": 2050, "PSG": 2050, "Aston Villa": 1900,
@@ -125,13 +135,13 @@ def _api_get(path):
 
 
 def _default_prof():
-    return {"elo": 1500, "w": 0, "d": 0, "l": 0, "gf": 0, "ga": 0, "n": 0,
-            "avg_scored": 1.35, "avg_conceded": 1.35}
+    return {"elo": 1500, "w": 0, "d": 0, "l": 0, "n": 0,
+            "h_att": 1.35, "h_def": 1.35, "a_att": 1.35, "a_def": 1.35}
 
 
 def team_profile(name):
     cached = FORM_CACHE.get(name)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and "h_att" in cached:
         return cached
     prof = _default_prof()
     data = _api_get("searchteams.php?t=" + quote(name))
@@ -140,8 +150,10 @@ def team_profile(name):
         tid = teams[0].get("idTeam")
         ev = _api_get("eventslast.php?id=" + str(tid))
         results = (ev or {}).get("results") or []
-        w = d = l = gf = ga = n = 0
-        for e in results[:5]:
+        w = d = l = n = 0
+        h_gf = h_ga = h_n = 0
+        a_gf = a_ga = a_n = 0
+        for e in results[:6]:
             fh = e.get("intHomeScore")
             fa = e.get("intAwayScore")
             if fh is None or fa is None:
@@ -149,22 +161,33 @@ def team_profile(name):
             fh = int(fh)
             fa = int(fa)
             if e.get("strHomeTeam") == name:
-                f1, f2 = fh, fa
+                gf, ga, venue = fh, fa, "H"
             else:
-                f1, f2 = fa, fh
-            gf += f1
-            ga += f2
+                gf, ga, venue = fa, fh, "A"
             n += 1
-            if f1 > f2:
+            if gf > ga:
                 w += 1
-            elif f1 == f2:
+            elif gf == ga:
                 d += 1
             else:
                 l += 1
+            if venue == "H":
+                h_gf += gf
+                h_ga += ga
+                h_n += 1
+            else:
+                a_gf += gf
+                a_ga += ga
+                a_n += 1
         if n:
-            prof = {"elo": 1500 + 60 * (w - l), "w": w, "d": d, "l": l,
-                    "gf": gf, "ga": ga, "n": n,
-                    "avg_scored": gf / float(n), "avg_conceded": ga / float(n)}
+            K = 3.0
+            prof = {
+                "elo": 1500 + 60 * (w - l), "w": w, "d": d, "l": l, "n": n,
+                "h_att": (h_gf + 1.35 * K) / (h_n + K),
+                "h_def": (h_ga + 1.35 * K) / (h_n + K),
+                "a_att": (a_gf + 1.35 * K) / (a_n + K),
+                "a_def": (a_ga + 1.35 * K) / (a_n + K),
+            }
     FORM_CACHE[name] = prof
     try:
         with open(FORM_CACHE_PATH, "w") as _f:
@@ -183,8 +206,7 @@ def elo(team):
 def form_text(p):
     if p["n"] == 0:
         return "no recent data"
-    return "W%d-D%d-L%d, scored %d, conceded %d (last %d)" % (
-        p["w"], p["d"], p["l"], p["gf"], p["ga"], p["n"])
+    return "W%d-D%d-L%d (last %d)" % (p["w"], p["d"], p["l"], p["n"])
 
 
 def league_country(league):
@@ -204,6 +226,18 @@ def _poisson_pmf(lam, max_g=10):
     pmf = [math.exp(-lam) * (lam ** i) / math.factorial(i) for i in range(max_g + 1)]
     s = sum(pmf)
     return [p / s for p in pmf]
+
+
+def _dc_tau(i, j, lh, la, rho):
+    if i == 0 and j == 0:
+        return 1.0 - lh * la * rho
+    if i == 0 and j == 1:
+        return 1.0 + lh * rho
+    if i == 1 and j == 0:
+        return 1.0 + la * rho
+    if i == 1 and j == 1:
+        return 1.0 - rho
+    return 1.0
 
 
 def fetch_events_day(date_str):
@@ -253,64 +287,61 @@ def get_fixtures(start_date, days):
 
 
 def model_match(home, away, league):
-    # STEP 1: deep fact-check of both teams (last-5 real results)
     hp = team_profile(home)
     ap = team_profile(away)
-
-    # STEP 2: AI analysis -> expected goals from form + rating
+    country = league_country(league)
+    base = LEAGUE_GOALS.get(country, 2.70)
+    hb = base * HOME_SHARE
+    ab = base * (1.0 - HOME_SHARE)
     r_home = ELO.get(home, hp["elo"])
     r_away = ELO.get(away, ap["elo"])
-    diff = (r_home + HOME_ADV) - r_away
-    gdiff_elo = max(-2.2, min(2.2, diff / 900.0))
-    lh_elo = max(0.25, (TOTAL_GOALS_BASE + gdiff_elo) / 2.0)
-    la_elo = max(0.25, (TOTAL_GOALS_BASE - gdiff_elo) / 2.0)
-
-    BASE = TOTAL_GOALS_BASE / 2.0
+    tilt = max(-0.35, min(0.35, (r_home - r_away) / 1200.0))
 
     def clampf(x):
         return max(0.4, min(2.2, x))
 
-    lh_form = BASE * clampf(hp["avg_scored"] / BASE) * clampf(ap["avg_conceded"] / BASE) * 1.15
-    la_form = BASE * clampf(ap["avg_scored"] / BASE) * clampf(hp["avg_conceded"] / BASE) * 0.90
-    lh = max(0.2, min(3.6, 0.5 * lh_elo + 0.5 * lh_form))
-    la = max(0.2, min(3.6, 0.5 * la_elo + 0.5 * la_form))
+    lh = hb * clampf(hp["h_att"] / 1.35) * clampf(ap["a_def"] / 1.35) * (1.0 + tilt)
+    la = ab * clampf(ap["a_att"] / 1.35) * clampf(hp["h_def"] / 1.35) * (1.0 - tilt)
+    lh = max(0.2, min(3.6, lh))
+    la = max(0.2, min(3.6, la))
 
-    # STEP 3: probabilities
     ph, pa = _poisson_pmf(lh), _poisson_pmf(la)
-    p_home = sum(ph[i] * pa[j] for i in range(11) for j in range(11) if i > j)
-    p_draw = sum(ph[i] * pa[i] for i in range(11))
+    mat = [[ph[i] * pa[j] * _dc_tau(i, j, lh, la, RHO) for j in range(11)] for i in range(11)]
+    total_p = sum(sum(row) for row in mat)
+    mat = [[mat[i][j] / total_p for j in range(11)] for i in range(11)]
+
+    p_home = sum(mat[i][j] for i in range(11) for j in range(11) if i > j)
+    p_draw = sum(mat[i][i] for i in range(11))
     p_away = 1.0 - p_home - p_draw
-    p_over25 = sum(ph[i] * pa[j] for i in range(11) for j in range(11) if i + j >= 3)
-    p_btts = sum(ph[i] * pa[j] for i in range(1, 11) for j in range(1, 11))
+    p_over25 = sum(mat[i][j] for i in range(11) for j in range(11) if i + j >= 3)
+    p_btts = sum(mat[i][j] for i in range(1, 11) for j in range(1, 11))
     p_ht05 = 1.0 - math.exp(-0.45 * (lh + la))
     corners = _poisson_pmf(9.0 + 0.6 * (lh + la), 16)
     p_cor85 = sum(corners[i] for i in range(9, 17))
 
-    # STEP 4: expected score DERIVED FROM the analysis above
     bi, bj, bp = 1, 1, -1.0
     for i in range(6):
         for j in range(6):
-            if ph[i] * pa[j] > bp:
-                bp = ph[i] * pa[j]
+            if mat[i][j] > bp:
+                bp = mat[i][j]
                 bi, bj = i, j
-    if bi == bj:
-        if p_home > p_draw and p_home > p_away:
-            bp = -1.0
-            for i in range(6):
-                for j in range(6):
-                    if i > j and ph[i] * pa[j] > bp:
-                        bp = ph[i] * pa[j]
-                        bi, bj = i, j
-        elif p_away > p_draw and p_away > p_home:
-            bp = -1.0
-            for i in range(6):
-                for j in range(6):
-                    if i < j and ph[i] * pa[j] > bp:
-                        bp = ph[i] * pa[j]
-                        bi, bj = i, j
+    if bi == bj and p_home > p_draw and p_home > p_away:
+        bp = -1.0
+        for i in range(6):
+            for j in range(6):
+                if i > j and mat[i][j] > bp:
+                    bp = mat[i][j]
+                    bi, bj = i, j
+    elif bi == bj and p_away > p_draw and p_away > p_home:
+        bp = -1.0
+        for i in range(6):
+            for j in range(6):
+                if i < j and mat[i][j] > bp:
+                    bp = mat[i][j]
+                    bi, bj = i, j
 
     return {
-        "league": league, "country": league_country(league),
+        "league": league, "country": country,
         "home": home, "away": away, "xg_home": lh, "xg_away": la,
         "form_home": form_text(hp), "form_away": form_text(ap),
         "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
@@ -573,7 +604,7 @@ init_db()
 
 st.set_page_config(page_title="Soccer AI Predictor", page_icon="⚽", layout="wide")
 st.title("⚽ Soccer AI Prediction App")
-st.caption("Pipeline: *fact-check* → *deep team-form AI analysis* → *expected score* → mixed slips • Booking odds neglected • Simulated games removed")
+st.caption("v5 Dixon-Coles model • *fact-check* → *team analysis* → *expected score* → mixed slips • Booking odds neglected • Simulated games removed")
 
 with st.sidebar:
     st.header("🎛️ Controls")
@@ -618,7 +649,7 @@ with tab_pred:
         st.dataframe(pd.DataFrame(st.session_state["report"]),
                      use_container_width=True, hide_index=True)
         st.success(str(st.session_state["nfix"]) + " verified fixtures loaded (simulated removed).")
-        st.header("📊 AI Match Probabilities (after deep team analysis)")
+        st.header("📊 AI Match Probabilities (Dixon-Coles v5)")
         st.dataframe(pd.DataFrame(st.session_state["rows"]),
                      use_container_width=True, hide_index=True)
 
