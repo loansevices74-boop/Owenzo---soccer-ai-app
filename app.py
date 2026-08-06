@@ -458,4 +458,7 @@ with tab_pred:
                      use_container_width=True, hide_index=True)
         st.success(str(st.session_state["nfix"]) + " verified fixtures loaded (simulated removed).")
         st.header("📊 AI Match Probabilities")
-        st.dataframe(pd.DataFrame
+        st.dataframe(pd.DataFrame(slips), use_container_width=True, hide_index=True)
+
+st.divider()
+st.caption("Paper-trade first. This app never reads bookmaker odds; all prices are internal AI Fair Odds.")
