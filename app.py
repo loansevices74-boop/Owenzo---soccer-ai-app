@@ -1,4 +1,4 @@
-# Soccer AI Prediction Web App - single file build
+# Soccer AI Prediction Web App - final single-file build
 import math
 import re
 import sqlite3
@@ -239,7 +239,6 @@ def ai_analysis(leg):
             + str(leg["odds"]) + " (booking odds neglected).")
 
 
-# ---------------- TRACKER ----------------
 def conn():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -407,7 +406,7 @@ def all_slips():
             "SELECT slip_id, slip_type, fixture_date, total_odds, stake, status, payout, profit FROM slips ORDER BY slip_id DESC")]
 
 
-# ---------------- UI ----------------
+# ------------------------------- UI -------------------------------
 init_db()
 
 st.set_page_config(page_title="Soccer AI Predictor", page_icon="⚽", layout="wide")
@@ -458,7 +457,101 @@ with tab_pred:
                      use_container_width=True, hide_index=True)
         st.success(str(st.session_state["nfix"]) + " verified fixtures loaded (simulated removed).")
         st.header("📊 AI Match Probabilities")
+        st.dataframe(pd.DataFrame(st.session_state["rows"]),
+                     use_container_width=True, hide_index=True)
+
+        stakes = {"DAILY": 0.005, "WEEKLY": 0.0025, "VIP": 0.001}
+        titles = {"DAILY": "🟢 Daily Mixed Accumulator",
+                  "WEEKLY": "🔵 Weekly Mixed Accumulator",
+                  "VIP": "👑 VIP Weekly ~200-Odds Accumulator"}
+        for key in ("DAILY", "WEEKLY", "VIP"):
+            slip, tot = st.session_state["slips"][key]
+            st.header(titles[key])
+            if not slip:
+                st.info("No qualifying legs.")
+                continue
+            stake = round(bankroll * stakes[key], 2)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total AI Odds", "%.2f" % tot)
+            c2.metric("Legs", len(slip))
+            c3.metric("Suggested Stake", str(stake))
+            st.dataframe(pd.DataFrame([{
+                "Country": l["country"], "League": l["league"], "Match": l["match"],
+                "Market": l["market"], "Selection": l["selection"],
+                "Prob": "%.0f%%" % (l["prob"] * 100),
+                "AI Fair Odds": l["odds"], "Exp. Score": l["expected_score"],
+            } for l in slip]), use_container_width=True, hide_index=True)
+            with st.expander("🤖 AI analysis for every leg"):
+                for l in slip:
+                    st.markdown(ai_analysis(l))
+
+        if st.button("💾 Log these slips to tracker"):
+            for key in ("DAILY", "WEEKLY", "VIP"):
+                slip, tot = st.session_state["slips"][key]
+                if slip:
+                    log_slip(key, slip, tot, round(bankroll * stakes[key], 2), str(start_date))
+            st.success("Logged to soccer_tracker.db")
+
+with tab_track:
+    st.header("📈 Results Tracker & ROI Dashboard")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if st.button("🔄 Auto-grade from live feed"):
+            st.success(str(auto_grade_from_feed()) + " legs auto-graded.")
+    with c2:
+        st.caption("HT-goals & corner legs need manual entry (feed lacks that data).")
+
+    o = overall_stats()
+    m = st.columns(5)
+    m[0].metric("Staked", o["total_staked"])
+    m[1].metric("Profit", o["profit"])
+    m[2].metric("ROI", str(o["roi"]) + "%")
+    m[3].metric("Slips Settled", o["slips_settled"])
+    m[4].metric("Slip Hit Rate", str(o["slip_hit_rate"]) + "%")
+
+    curve = profit_curve()
+    if curve:
+        dfc = pd.DataFrame(curve, columns=["when", "profit"])
+        dfc["cum_profit"] = dfc.profit.cumsum()
+        st.subheader("💰 Cumulative Profit Curve")
+        st.line_chart(dfc.set_index("when")["cum_profit"])
+
+    st.subheader("🎯 Hit-rate per Country / League / Market")
+    g1, g2, g3 = st.columns(3)
+    for col, field in [(g1, "country"), (g2, "league"), (g3, "market")]:
+        rowsg = group_hit_rate(field)
+        if rowsg:
+            dfg = pd.DataFrame(rowsg)
+            col.bar_chart(dfg.set_index("grp")["hit_rate"])
+            col.dataframe(dfg, hide_index=True)
+
+    st.subheader("✍️ Manual result entry")
+    pend = pending_legs()
+    if pend:
+        opts = {"#" + str(r["leg_id"]) + " [" + r["slip_type"] + "] " + r["match"] + " - " + r["selection"]: r for r in pend}
+        pick = st.selectbox("Pending leg", list(opts))
+        r = opts[pick]
+        a, b = st.columns(2)
+        fh = a.number_input("Home FT goals", 0, 20, 0, key="fh")
+        fa = b.number_input("Away FT goals", 0, 20, 0, key="fa")
+        ht = None
+        if st.checkbox("Enter half-time score"):
+            h1, h2 = st.columns(2)
+            ht = (h1.number_input("HT home", 0, 10, 0, key="hth"),
+                  h2.number_input("HT away", 0, 10, 0, key="hta"))
+        corners = None
+        if st.checkbox("Enter total corners"):
+            corners = st.number_input("Corners", 0, 30, 0, key="cor")
+        if st.button("Grade leg"):
+            st.info("Leg graded: **" + enter_result(r["leg_id"], fh, fa, ht, corners) + "**")
+    else:
+        st.info("No pending legs.")
+
+    st.subheader("Slip log")
+    slips = all_slips()
+    if slips:
         st.dataframe(pd.DataFrame(slips), use_container_width=True, hide_index=True)
 
 st.divider()
+st.caption("Paper-trade first. This app never reads bookmaker odds; all prices are internal AI Fair Odds.")
 st.caption("Paper-trade first. This app never reads bookmaker odds; all prices are internal AI Fair Odds.")
