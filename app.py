@@ -1,17 +1,20 @@
-# Soccer AI Prediction Web App - final single-file build
+# Soccer AI Prediction Web App - final v2 (country fix + form ratings + smart expected score)
 import math
 import re
+import json
 import sqlite3
 import requests
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 SPORTSDB_KEYS = ["3", "123"]
 API = "https://www.thesportsdb.com/api/v1/json/{key}/eventsday.php"
 HOME_ADV = 65
 TOTAL_GOALS_BASE = 2.70
 DB_PATH = "soccer_tracker.db"
+FORM_CACHE_PATH = "form_cache.json"
 
 ELO = {
     "Paris Saint-Germain": 2050, "PSG": 2050, "Aston Villa": 1900,
@@ -59,6 +62,32 @@ LEAGUE_ALIAS = {
     "uefa super cup": "International Clubs",
 }
 
+SUBSTR_ALIAS = [
+    ("argentin", "Argentina"), ("usl", "USA"), ("mls", "USA"),
+    ("american", "USA"), ("irish", "Ireland"), ("mexic", "Mexico"),
+    ("brasileirao", "Brazil"), ("finnish", "Finland"), ("swedish", "Sweden"),
+    ("norwegian", "Norway"), ("dutch", "Netherlands"), ("eredivisie", "Netherlands"),
+    ("french", "France"), ("ligue 1", "France"), ("german", "Germany"),
+    ("bundesliga", "Germany"), ("spanish", "Spain"), ("la liga", "Spain"),
+    ("italian", "Italy"), ("portuguese", "Portugal"), ("primeira liga", "Portugal"),
+    ("turkish", "Turkiye"), ("greek", "Greece"), ("scottish", "Scotland"),
+    ("english", "England"), ("premier league", "England"), ("championship", "England"),
+    ("polish", "Poland"), ("ukrainian", "Ukraine"), ("romanian", "Romania"),
+    ("croatian", "Croatia"), ("serbian", "Serbia"), ("slovenian", "Slovenia"),
+    ("slovak", "Slovakia"), ("czech", "Czechia"), ("danish", "Denmark"),
+    ("belgian", "Belgium"), ("austrian", "Austria"), ("swiss", "Switzerland"),
+    ("chilean", "Chile"), ("colombian", "Colombia"), ("peruvian", "Peru"),
+    ("bolivian", "Bolivia"), ("uruguay", "Uruguay"), ("paraguay", "Paraguay"),
+    ("venezuel", "Venezuela"), ("ecuador", "Ecuador"), ("japanese", "Japan"),
+    ("australian", "Australia"), ("south african", "South Africa"),
+    ("indian", "India"), ("chinese", "China"), ("k league", "Republic of Korea"),
+    ("armenian", "Armenia"), ("georgian", "Georgia"), ("kazakh", "Kazakhstan"),
+    ("uzbek", "Uzbekistan"), ("estonian", "Estonia"), ("latvian", "Latvia"),
+    ("lithuanian", "Lithuania"), ("icelandic", "Iceland"), ("faroe", "Faroe Islands"),
+    ("welsh", "Wales"), ("hungarian", "Hungary"), ("bulgarian", "Bulgaria"),
+    ("russian", "Russia"), ("canadian", "Canada"), ("costa ric", "Costa Rica"),
+]
+
 OFFLINE_VERIFIED = [
     {"date": "2026-08-07", "league": "Veikkausliiga", "home": "SJK", "away": "Gnistan"},
     {"date": "2026-08-07", "league": "Leagues Cup", "home": "Charlotte FC", "away": "Atlas"},
@@ -76,15 +105,75 @@ OFFLINE_VERIFIED = [
     {"date": "2026-08-13", "league": "UEFA Conference League Qualifying", "home": "Motherwell", "away": "HJK"},
 ]
 
+try:
+    with open(FORM_CACHE_PATH) as _f:
+        FORM_CACHE = json.load(_f)
+except Exception:
+    FORM_CACHE = {}
+
+
+def _api_get(path):
+    for key in SPORTSDB_KEYS:
+        try:
+            r = requests.get("https://www.thesportsdb.com/api/v1/json/" + key + "/" + path, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            continue
+    return None
+
+
+def team_form_elo(name):
+    if name in FORM_CACHE:
+        return FORM_CACHE[name]
+    rating = 1500
+    data = _api_get("searchteams.php?t=" + quote(name))
+    teams = (data or {}).get("teams")
+    if teams:
+        tid = teams[0].get("idTeam")
+        ev = _api_get("eventslast.php?id=" + str(tid))
+        results = (ev or {}).get("results") or []
+        w = d = l = 0
+        for e in results[:5]:
+            fh = e.get("intHomeScore")
+            fa = e.get("intAwayScore")
+            if fh is None or fa is None:
+                continue
+            fh = int(fh)
+            fa = int(fa)
+            if e.get("strHomeTeam") == name:
+                gf, ga = fh, fa
+            else:
+                gf, ga = fa, fh
+            if gf > ga:
+                w += 1
+            elif gf == ga:
+                d += 1
+            else:
+                l += 1
+        rating = 1500 + 60 * (w - l)
+    FORM_CACHE[name] = rating
+    try:
+        with open(FORM_CACHE_PATH, "w") as _f:
+            json.dump(FORM_CACHE, _f)
+    except Exception:
+        pass
+    return rating
+
 
 def elo(team):
-    return ELO.get(team, 1500)
+    if team in ELO:
+        return ELO[team]
+    return team_form_elo(team)
 
 
 def league_country(league):
     l = (league or "").lower()
     if l in LEAGUE_ALIAS:
         return LEAGUE_ALIAS[l]
+    for sub, ctry in SUBSTR_ALIAS:
+        if sub in l:
+            return ctry
     for c in WORKING_COUNTRIES:
         if c.lower() in l:
             return c
@@ -157,6 +246,30 @@ def model_match(home, away, league):
     p_ht05 = 1.0 - math.exp(-0.45 * (lh + la))
     corners = _poisson_pmf(9.0 + 0.6 * (lh + la), 16)
     p_cor85 = sum(corners[i] for i in range(9, 17))
+
+    # most likely exact scoreline, consistent with the predicted outcome
+    bi, bj, bp = 1, 1, -1.0
+    for i in range(6):
+        for j in range(6):
+            if ph[i] * pa[j] > bp:
+                bp = ph[i] * pa[j]
+                bi, bj = i, j
+    if bi == bj:
+        if p_home > p_draw and p_home > p_away:
+            bp = -1.0
+            for i in range(6):
+                for j in range(6):
+                    if i > j and ph[i] * pa[j] > bp:
+                        bp = ph[i] * pa[j]
+                        bi, bj = i, j
+        elif p_away > p_draw and p_away > p_home:
+            bp = -1.0
+            for i in range(6):
+                for j in range(6):
+                    if i < j and ph[i] * pa[j] > bp:
+                        bp = ph[i] * pa[j]
+                        bi, bj = i, j
+
     return {
         "league": league, "country": league_country(league),
         "home": home, "away": away, "xg_home": lh, "xg_away": la,
@@ -164,7 +277,7 @@ def model_match(home, away, league):
         "p_over25": p_over25, "p_under25": 1 - p_over25,
         "p_btts_yes": p_btts, "p_btts_no": 1 - p_btts,
         "p_ht_over05": p_ht05, "p_corners_over85": p_cor85,
-        "expected_score": "%d - %d" % (max(0, round(lh)), max(0, round(la))),
+        "expected_score": "%d - %d" % (bi, bj),
     }
 
 
@@ -232,7 +345,7 @@ def build_vip(legs, target=200.0, max_legs=16):
 
 
 def ai_analysis(leg):
-    return ("**AI Analysis (" + leg["league"] + "):** Model confidence "
+    return ("*AI Analysis (" + leg["league"] + "):* Model confidence "
             + str(int(leg["prob"] * 100)) + "% on '" + leg["selection"] + "'. "
             + "Expected goals " + leg["xg"] + " -> expected score line **"
             + leg["expected_score"] + "**. AI Fair Odds "
@@ -391,7 +504,7 @@ def overall_stats():
 def group_hit_rate(field):
     with conn() as c:
         return [dict(zip(r.keys(), r)) for r in c.execute(
-            "SELECT " + field + " AS grp, COUNT(*) AS legs, SUM(result='WON') AS won, ROUND(100.0*SUM(result='WON')/COUNT(*),1) AS hit_rate FROM legs WHERE result IN ('WON','LOST') GROUP BY " + field + " ORDER BY legs DESC")]
+            "SELECT " + field + " AS grp, COUNT() AS legs, SUM(result='WON') AS won, ROUND(100.0*SUM(result='WON')/COUNT(),1) AS hit_rate FROM legs WHERE result IN ('WON','LOST') GROUP BY " + field + " ORDER BY legs DESC")]
 
 
 def profit_curve():
@@ -411,10 +524,10 @@ init_db()
 
 st.set_page_config(page_title="Soccer AI Predictor", page_icon="⚽", layout="wide")
 st.title("⚽ Soccer AI Prediction App")
-st.caption("Booking odds **neglected** • Fixtures **fact-checked live** • **League + expected score** always shown • Simulated games removed")
+st.caption("Booking odds *neglected* • Fixtures *fact-checked live* • *League + expected score* always shown • Simulated games removed")
 
 with st.sidebar:
-    st.header("🎛 Controls")
+    st.header("🎛️ Controls")
     start_date = st.date_input("Start date (from the 7th)", datetime(2026, 8, 7).date())
     days = st.slider("Window (days)", 1, 10, 7)
     bankroll = st.number_input("Bankroll", 100, 100000, 1000, step=100)
@@ -543,7 +656,7 @@ with tab_track:
         if st.checkbox("Enter total corners"):
             corners = st.number_input("Corners", 0, 30, 0, key="cor")
         if st.button("Grade leg"):
-            st.info("Leg graded: **" + enter_result(r["leg_id"], fh, fa, ht, corners) + "**")
+            st.info("Leg graded: *" + enter_result(r["leg_id"], fh, fa, ht, corners) + "*")
     else:
         st.info("No pending legs.")
 
@@ -553,5 +666,4 @@ with tab_track:
         st.dataframe(pd.DataFrame(slips), use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("Paper-trade first. This app never reads bookmaker odds; all prices are internal AI Fair Odds.")
 st.caption("Paper-trade first. This app never reads bookmaker odds; all prices are internal AI Fair Odds.")
