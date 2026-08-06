@@ -1,4 +1,5 @@
-# Soccer AI Prediction Web App - final v2 (country fix + form ratings + smart expected score)
+# OWENZO Soccer AI Prediction Web App - v3 FINAL
+# Pipeline: fact-check fixtures -> deep team form analysis -> expected score -> mixed slips
 import math
 import re
 import json
@@ -123,17 +124,23 @@ def _api_get(path):
     return None
 
 
-def team_form_elo(name):
-    if name in FORM_CACHE:
-        return FORM_CACHE[name]
-    rating = 1500
+def _default_prof():
+    return {"elo": 1500, "w": 0, "d": 0, "l": 0, "gf": 0, "ga": 0, "n": 0,
+            "avg_scored": 1.35, "avg_conceded": 1.35}
+
+
+def team_profile(name):
+    cached = FORM_CACHE.get(name)
+    if isinstance(cached, dict):
+        return cached
+    prof = _default_prof()
     data = _api_get("searchteams.php?t=" + quote(name))
     teams = (data or {}).get("teams")
     if teams:
         tid = teams[0].get("idTeam")
         ev = _api_get("eventslast.php?id=" + str(tid))
         results = (ev or {}).get("results") or []
-        w = d = l = 0
+        w = d = l = gf = ga = n = 0
         for e in results[:5]:
             fh = e.get("intHomeScore")
             fa = e.get("intAwayScore")
@@ -142,29 +149,42 @@ def team_form_elo(name):
             fh = int(fh)
             fa = int(fa)
             if e.get("strHomeTeam") == name:
-                gf, ga = fh, fa
+                f1, f2 = fh, fa
             else:
-                gf, ga = fa, fh
-            if gf > ga:
+                f1, f2 = fa, fh
+            gf += f1
+            ga += f2
+            n += 1
+            if f1 > f2:
                 w += 1
-            elif gf == ga:
+            elif f1 == f2:
                 d += 1
             else:
                 l += 1
-        rating = 1500 + 60 * (w - l)
-    FORM_CACHE[name] = rating
+        if n:
+            prof = {"elo": 1500 + 60 * (w - l), "w": w, "d": d, "l": l,
+                    "gf": gf, "ga": ga, "n": n,
+                    "avg_scored": gf / float(n), "avg_conceded": ga / float(n)}
+    FORM_CACHE[name] = prof
     try:
         with open(FORM_CACHE_PATH, "w") as _f:
             json.dump(FORM_CACHE, _f)
     except Exception:
         pass
-    return rating
+    return prof
 
 
 def elo(team):
     if team in ELO:
         return ELO[team]
-    return team_form_elo(team)
+    return team_profile(team)["elo"]
+
+
+def form_text(p):
+    if p["n"] == 0:
+        return "no recent data"
+    return "W%d-D%d-L%d, scored %d, conceded %d (last %d)" % (
+        p["w"], p["d"], p["l"], p["gf"], p["ga"], p["n"])
 
 
 def league_country(league):
@@ -233,10 +253,29 @@ def get_fixtures(start_date, days):
 
 
 def model_match(home, away, league):
-    diff = (elo(home) + HOME_ADV) - elo(away)
-    gdiff = max(-2.2, min(2.2, diff / 900.0))
-    lh = max(0.25, (TOTAL_GOALS_BASE + gdiff) / 2.0)
-    la = max(0.25, (TOTAL_GOALS_BASE - gdiff) / 2.0)
+    # STEP 1: deep fact-check of both teams (last-5 real results)
+    hp = team_profile(home)
+    ap = team_profile(away)
+
+    # STEP 2: AI analysis -> expected goals from form + rating
+    r_home = ELO.get(home, hp["elo"])
+    r_away = ELO.get(away, ap["elo"])
+    diff = (r_home + HOME_ADV) - r_away
+    gdiff_elo = max(-2.2, min(2.2, diff / 900.0))
+    lh_elo = max(0.25, (TOTAL_GOALS_BASE + gdiff_elo) / 2.0)
+    la_elo = max(0.25, (TOTAL_GOALS_BASE - gdiff_elo) / 2.0)
+
+    BASE = TOTAL_GOALS_BASE / 2.0
+
+    def clampf(x):
+        return max(0.4, min(2.2, x))
+
+    lh_form = BASE * clampf(hp["avg_scored"] / BASE) * clampf(ap["avg_conceded"] / BASE) * 1.15
+    la_form = BASE * clampf(ap["avg_scored"] / BASE) * clampf(hp["avg_conceded"] / BASE) * 0.90
+    lh = max(0.2, min(3.6, 0.5 * lh_elo + 0.5 * lh_form))
+    la = max(0.2, min(3.6, 0.5 * la_elo + 0.5 * la_form))
+
+    # STEP 3: probabilities
     ph, pa = _poisson_pmf(lh), _poisson_pmf(la)
     p_home = sum(ph[i] * pa[j] for i in range(11) for j in range(11) if i > j)
     p_draw = sum(ph[i] * pa[i] for i in range(11))
@@ -247,7 +286,7 @@ def model_match(home, away, league):
     corners = _poisson_pmf(9.0 + 0.6 * (lh + la), 16)
     p_cor85 = sum(corners[i] for i in range(9, 17))
 
-    # most likely exact scoreline, consistent with the predicted outcome
+    # STEP 4: expected score DERIVED FROM the analysis above
     bi, bj, bp = 1, 1, -1.0
     for i in range(6):
         for j in range(6):
@@ -273,6 +312,7 @@ def model_match(home, away, league):
     return {
         "league": league, "country": league_country(league),
         "home": home, "away": away, "xg_home": lh, "xg_away": la,
+        "form_home": form_text(hp), "form_away": form_text(ap),
         "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
         "p_over25": p_over25, "p_under25": 1 - p_over25,
         "p_btts_yes": p_btts, "p_btts_no": 1 - p_btts,
@@ -295,6 +335,7 @@ def generate_legs(pred):
             "prob": round(prob, 3), "odds": round(1.0 / prob, 2),
             "expected_score": pred["expected_score"],
             "xg": "%.2f - %.2f" % (pred["xg_home"], pred["xg_away"]),
+            "form": pred["form_home"] + " | " + pred["form_away"],
         })
 
     add("1X2", pred["home"] + " Win", pred["p_home"])
@@ -309,35 +350,41 @@ def generate_legs(pred):
     return legs
 
 
-def build_accumulator(legs, max_odds, max_legs, max_per_match=1):
+def build_accumulator(legs, max_odds, max_legs, max_per_match=1, max_per_market=1):
     legs = sorted(legs, key=lambda l: l["prob"], reverse=True)
-    chosen, total, count = [], 1.0, {}
+    chosen, total, count, mkt = [], 1.0, {}, {}
     for leg in legs:
         if len(chosen) >= max_legs:
             break
         m = leg["match"]
         if count.get(m, 0) >= max_per_match:
             continue
+        if mkt.get(leg["market"], 0) >= max_per_market:
+            continue
         if total * leg["odds"] > max_odds:
             continue
         chosen.append(leg)
         count[m] = count.get(m, 0) + 1
+        mkt[leg["market"]] = mkt.get(leg["market"], 0) + 1
         total *= leg["odds"]
     return chosen, round(total, 2)
 
 
-def build_vip(legs, target=200.0, max_legs=16):
+def build_vip(legs, target=200.0, max_legs=16, max_per_market=4):
     legs = [l for l in legs if 0.55 <= l["prob"] <= 0.85]
     legs = sorted(legs, key=lambda l: l["prob"], reverse=True)
-    chosen, total, count = [], 1.0, {}
+    chosen, total, count, mkt = [], 1.0, {}, {}
     for leg in legs:
         if len(chosen) >= max_legs:
             break
         m = leg["match"]
         if count.get(m, 0) >= 2:
             continue
+        if mkt.get(leg["market"], 0) >= max_per_market:
+            continue
         chosen.append(leg)
         count[m] = count.get(m, 0) + 1
+        mkt[leg["market"]] = mkt.get(leg["market"], 0) + 1
         total *= leg["odds"]
         if total >= target * 0.95:
             break
@@ -345,11 +392,13 @@ def build_vip(legs, target=200.0, max_legs=16):
 
 
 def ai_analysis(leg):
-    return ("*AI Analysis (" + leg["league"] + "):* Model confidence "
-            + str(int(leg["prob"] * 100)) + "% on '" + leg["selection"] + "'. "
-            + "Expected goals " + leg["xg"] + " -> expected score line **"
-            + leg["expected_score"] + "**. AI Fair Odds "
-            + str(leg["odds"]) + " (booking odds neglected).")
+    return ("*AI Analysis (" + leg["league"] + "):* "
+            + leg["home"] + " form: " + leg["form"].split(" | ")[0]
+            + " --- " + leg["away"] + " form: " + leg["form"].split(" | ")[1]
+            + ". Model confidence " + str(int(leg["prob"] * 100)) + "% on '"
+            + leg["selection"] + "'. Expected goals " + leg["xg"]
+            + " -> expected score **" + leg["expected_score"]
+            + "**. AI Fair Odds " + str(leg["odds"]) + " (booking odds neglected).")
 
 
 def conn():
@@ -524,7 +573,7 @@ init_db()
 
 st.set_page_config(page_title="Soccer AI Predictor", page_icon="⚽", layout="wide")
 st.title("⚽ Soccer AI Prediction App")
-st.caption("Booking odds *neglected* • Fixtures *fact-checked live* • *League + expected score* always shown • Simulated games removed")
+st.caption("Pipeline: *fact-check* → *deep team-form AI analysis* → *expected score* → mixed slips • Booking odds neglected • Simulated games removed")
 
 with st.sidebar:
     st.header("🎛️ Controls")
@@ -547,6 +596,8 @@ with tab_pred:
             rows.append({
                 "Date": f["date"], "Country": f["country"], "League": f["league"],
                 "Match": f["home"] + " vs " + f["away"],
+                "Form (Home)": pred["form_home"],
+                "Form (Away)": pred["form_away"],
                 "Exp. Score": pred["expected_score"],
                 "xG (H-A)": "%.2f - %.2f" % (pred["xg_home"], pred["xg_away"]),
                 "P(Home)": "%.0f%%" % (pred["p_home"] * 100),
@@ -559,9 +610,9 @@ with tab_pred:
         st.session_state["rows"] = rows
         st.session_state["nfix"] = len(fixtures)
         st.session_state["slips"] = {
-            "DAILY": build_accumulator(all_legs, 8, 4),
-            "WEEKLY": build_accumulator(all_legs, 25, 7),
-            "VIP": build_vip(all_legs),
+            "DAILY": build_accumulator(all_legs, 8, 4, 1, 1),
+            "WEEKLY": build_accumulator(all_legs, 25, 7, 1, 2),
+            "VIP": build_vip(all_legs, 200.0, 16, 4),
         }
 
     if "slips" in st.session_state:
@@ -569,7 +620,7 @@ with tab_pred:
         st.dataframe(pd.DataFrame(st.session_state["report"]),
                      use_container_width=True, hide_index=True)
         st.success(str(st.session_state["nfix"]) + " verified fixtures loaded (simulated removed).")
-        st.header("📊 AI Match Probabilities")
+        st.header("📊 AI Match Probabilities (after deep team analysis)")
         st.dataframe(pd.DataFrame(st.session_state["rows"]),
                      use_container_width=True, hide_index=True)
 
@@ -592,7 +643,9 @@ with tab_pred:
                 "Country": l["country"], "League": l["league"], "Match": l["match"],
                 "Market": l["market"], "Selection": l["selection"],
                 "Prob": "%.0f%%" % (l["prob"] * 100),
-                "AI Fair Odds": l["odds"], "Exp. Score": l["expected_score"],
+                "AI Fair Odds": l["odds"],
+                "Team form (H | A)": l["form"],
+                "Exp. Score": l["expected_score"],
             } for l in slip]), use_container_width=True, hide_index=True)
             with st.expander("🤖 AI analysis for every leg"):
                 for l in slip:
