@@ -1,4 +1,4 @@
-# Soccer AI Prediction Web App - v3 FINAL
+# Soccer AI Prediction Web App - v4 FINAL
 # Pipeline: fact-check fixtures -> deep team form analysis -> expected score -> mixed slips
 import math
 import re
@@ -596,8 +596,6 @@ with tab_pred:
             rows.append({
                 "Date": f["date"], "Country": f["country"], "League": f["league"],
                 "Match": f["home"] + " vs " + f["away"],
-                "Form (Home)": pred["form_home"],
-                "Form (Away)": pred["form_away"],
                 "Exp. Score": pred["expected_score"],
                 "xG (H-A)": "%.2f - %.2f" % (pred["xg_home"], pred["xg_away"]),
                 "P(Home)": "%.0f%%" % (pred["p_home"] * 100),
@@ -644,7 +642,6 @@ with tab_pred:
                 "Market": l["market"], "Selection": l["selection"],
                 "Prob": "%.0f%%" % (l["prob"] * 100),
                 "AI Fair Odds": l["odds"],
-                "Team form (H | A)": l["form"],
                 "Exp. Score": l["expected_score"],
             } for l in slip]), use_container_width=True, hide_index=True)
             with st.expander("🤖 AI analysis for every leg"):
