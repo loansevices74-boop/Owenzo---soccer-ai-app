@@ -188,6 +188,17 @@ def team_profile(name, league=""):
                 "a_att": (a_gf + 1.35 * K) / (a_n + K),
                 "a_def": (a_ga + 1.35 * K) / (a_n + K),
             }
+    try:
+        import xg
+        xr = xg.xg_rates(name, league, league_country(league))
+        if xr:
+            prof["h_att"] = xr["h_att"]
+            prof["h_def"] = xr["h_def"]
+            prof["a_att"] = xr["a_att"]
+            prof["a_def"] = xr["a_def"]
+            prof["src"] = "xG"
+    except Exception:
+        pass
     FORM_CACHE[name] = prof
     try:
         with open(FORM_CACHE_PATH, "w") as _f:
