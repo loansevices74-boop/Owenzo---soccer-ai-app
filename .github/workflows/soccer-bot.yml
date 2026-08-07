@@ -1,0 +1,32 @@
+name: soccer-bot
+on:
+  schedule:
+    - cron: "0 6 * * *"
+    - cron: "0 6 * * 5"
+    - cron: "0 21 * * 0"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: deps
+        run: pip install requests
+      - name: run bot
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          BANKROLL: ${{ secrets.BANKROLL }}
+          CRON: ${{ github.event.schedule }}
+        run: python bot_ci.py
+      - name: save tracker
+        run: |
+          git config user.name "soccer-bot"
+          git config user.email "bot@local"
+          git add -f soccer_tracker.db form_cache.json
+          git diff --cached --quiet || { git commit -m "tracker update"; git push; }
