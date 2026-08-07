@@ -1,4 +1,4 @@
-# bot_ci.py - self-contained Telegram auto-post bot (GitHub Actions)
+# bot_ci.py v2 - self-contained Telegram bot with xG layer
 import os
 import re
 import math
@@ -198,6 +198,12 @@ def team_profile(name, league=""):
     except Exception:
         pass
     return prof
+
+
+def elo(team):
+    if team in ELO:
+        return ELO[team]
+    return team_profile(team)["elo"]
 
 
 def form_text(p):
@@ -419,7 +425,6 @@ def build_vip(legs, target=200.0, max_legs=16, max_per_market=4):
     return chosen, round(total, 2)
 
 
-# ---------------- TRACKER ----------------
 def conn():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -529,14 +534,16 @@ def auto_grade_from_feed():
     return graded
 
 
-# ---------------- TELEGRAM ----------------
 def tg_send(text):
     if not TG_TOKEN:
         print("[DRY RUN]\n" + text)
         return
-    requests.post("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
-                  json={"chat_id": TG_CHAT, "text": text,
-                        "disable_web_page_preview": True}, timeout=20)
+    try:
+        requests.post("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
+                      json={"chat_id": TG_CHAT, "text": text,
+                            "disable_web_page_preview": True}, timeout=20)
+    except Exception as e:
+        print("TG send failed:", e)
 
 
 def send_long(text, limit=4000):
