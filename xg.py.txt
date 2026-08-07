@@ -1,0 +1,106 @@
+# xg.py - expected-goals layer (Understat) with silent fallback
+import re
+import json
+import codecs
+import requests
+from datetime import datetime
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+UNDERSTAT_MAP = [
+    ("england", "premier league", "EPL"),
+    ("spain", "la liga", "La_liga"),
+    ("germany", "bundesliga", "Bundesliga"),
+    ("italy", "serie a", "Serie_A"),
+    ("france", "ligue 1", "Ligue_1"),
+]
+
+NAME_ALIASES = {
+    "psg": "parissaintgermain",
+    "parissaint-germain": "parissaintgermain",
+}
+
+_CACHE = {}
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _season_year():
+    now = datetime.today()
+    return now.year if now.month >= 7 else now.year - 1
+
+
+def _fetch_league(code, year):
+    key = (code, year)
+    if key in _CACHE:
+        return _CACHE[key]
+    out = {}
+    try:
+        r = requests.get("https://understat.com/league/%s/%d" % (code, year),
+                         headers=HEADERS, timeout=20)
+        m = re.search(r"teamsData\s*=\s*JSON.parse\('(.+?)'\);", r.text, re.S)
+        if m:
+            data = json.loads(codecs.decode(m.group(1), "unicode_escape"))
+            for tid, t in data.items():
+                acc = {"name": t.get("title", ""), "h_xgf": 0.0, "h_xga": 0.0,
+                       "h_n": 0, "a_xgf": 0.0, "a_xga": 0.0, "a_n": 0}
+                for h in t.get("history", []):
+                    try:
+                        xg = float(h.get("xG"))
+                        xga = float(h.get("xGA"))
+                        ha = h.get("h_a")
+                    except Exception:
+                        continue
+                    if ha == "h":
+                        acc["h_xgf"] += xg
+                        acc["h_xga"] += xga
+                        acc["h_n"] += 1
+                    elif ha == "a":
+                        acc["a_xgf"] += xg
+                        acc["a_xga"] += xga
+                        acc["a_n"] += 1
+                out[_norm(acc["name"])] = acc
+    except Exception:
+        pass
+    _CACHE[key] = out
+    return out
+
+
+def _find_team(teams, name):
+    n = _norm(NAME_ALIASES.get(_norm(name), name))
+    if not n:
+        return None
+    if n in teams:
+        return teams[n]
+    for key, val in teams.items():
+        if len(n) >= 5 and (n in key or key in n):
+            return val
+    return None
+
+
+def xg_rates(team, league, country):
+    """Shrunk per-match xG attack/defense rates, or None if unavailable."""
+    l = (league or "").lower()
+    c = (country or "").lower()
+    code = None
+    for ckey, sub, code_x in UNDERSTAT_MAP:
+        if c == ckey and sub in l:
+            code = code_x
+            break
+    if not code:
+        return None
+    for year in (_season_year(), _season_year() - 1):
+        teams = _fetch_league(code, year)
+        acc = _find_team(teams, team)
+        if acc and (acc["h_n"] + acc["a_n"]) >= 3:
+            K = 3.0
+            B = 1.35
+            return {
+                "h_att": (acc["h_xgf"] + B * K) / (acc["h_n"] + K),
+                "h_def": (acc["h_xga"] + B * K) / (acc["h_n"] + K),
+                "a_att": (acc["a_xgf"] + B * K) / (acc["a_n"] + K),
+                "a_def": (acc["a_xga"] + B * K) / (acc["a_n"] + K),
+            }
+    return None
