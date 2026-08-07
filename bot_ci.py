@@ -284,8 +284,8 @@ def get_fixtures(start_date, days):
 
 
 def model_match(home, away, league):
-    hp = team_profile(home)
-    ap = team_profile(away)
+    hp = team_profile(home, league)
+    ap = team_profile(away, league)
     country = league_country(league)
     base = LEAGUE_GOALS.get(country, 2.70)
     hb = base * HOME_SHARE
