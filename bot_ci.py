@@ -1,4 +1,4 @@
-# bot_ci.py v2 - self-contained Telegram bot with xG layer
+# bot_ci.py - self-contained Telegram auto-post bot (GitHub Actions)
 import os
 import re
 import math
@@ -131,7 +131,7 @@ def _default_prof():
             "h_att": 1.35, "h_def": 1.35, "a_att": 1.35, "a_def": 1.35}
 
 
-def team_profile(name, league=""):
+def team_profile(name):
     cached = FORM_CACHE.get(name)
     if isinstance(cached, dict) and "h_att" in cached:
         return cached
@@ -180,17 +180,6 @@ def team_profile(name, league=""):
                 "a_att": (a_gf + 1.35 * K) / (a_n + K),
                 "a_def": (a_ga + 1.35 * K) / (a_n + K),
             }
-    try:
-        import xg
-        xr = xg.xg_rates(name, league, league_country(league))
-        if xr:
-            prof["h_att"] = xr["h_att"]
-            prof["h_def"] = xr["h_def"]
-            prof["a_att"] = xr["a_att"]
-            prof["a_def"] = xr["a_def"]
-            prof["src"] = "xG"
-    except Exception:
-        pass
     FORM_CACHE[name] = prof
     try:
         with open(FORM_CACHE_PATH, "w") as _f:
@@ -198,12 +187,6 @@ def team_profile(name, league=""):
     except Exception:
         pass
     return prof
-
-
-def elo(team):
-    if team in ELO:
-        return ELO[team]
-    return team_profile(team)["elo"]
 
 
 def form_text(p):
@@ -290,8 +273,8 @@ def get_fixtures(start_date, days):
 
 
 def model_match(home, away, league):
-    hp = team_profile(home, league)
-    ap = team_profile(away, league)
+    hp = team_profile(home)
+    ap = team_profile(away)
     country = league_country(league)
     base = LEAGUE_GOALS.get(country, 2.70)
     hb = base * HOME_SHARE
@@ -425,6 +408,7 @@ def build_vip(legs, target=200.0, max_legs=16, max_per_market=4):
     return chosen, round(total, 2)
 
 
+# ---------------- TRACKER ----------------
 def conn():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -534,16 +518,14 @@ def auto_grade_from_feed():
     return graded
 
 
+# ---------------- TELEGRAM ----------------
 def tg_send(text):
     if not TG_TOKEN:
         print("[DRY RUN]\n" + text)
         return
-    try:
-        requests.post("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
-                      json={"chat_id": TG_CHAT, "text": text,
-                            "disable_web_page_preview": True}, timeout=20)
-    except Exception as e:
-        print("TG send failed:", e)
+    requests.post("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
+                  json={"chat_id": TG_CHAT, "text": text,
+                        "disable_web_page_preview": True}, timeout=20)
 
 
 def send_long(text, limit=4000):
