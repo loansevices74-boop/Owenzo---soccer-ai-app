@@ -139,7 +139,7 @@ def _default_prof():
             "h_att": 1.35, "h_def": 1.35, "a_att": 1.35, "a_def": 1.35}
 
 
-def team_profile(name):
+def team_profile(name, league=""):
     cached = FORM_CACHE.get(name)
     if isinstance(cached, dict) and "h_att" in cached:
         return cached
