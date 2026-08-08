@@ -568,6 +568,8 @@ def fmt_slip(title, slip, total, stake):
         lines.append(fmt_leg(l))
     lines.append("-" * 34)
     lines.append("Booking odds neglected. AI Fair Odds only. Paper-trade first.")
+    lines.append("")
+    lines.append("📲 Join: https://t.me/owenzosoccerslips")
     return "\n".join(lines)
 
 
