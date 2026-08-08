@@ -629,6 +629,8 @@ def post_results():
         lines.append("TOP COUNTRIES (hit-rate):")
         for r in g:
             lines.append("- " + str(r["grp"]) + ": " + str(r["hr"]) + "% (" + str(r["legs"]) + " legs)")
+    lines.append("")
+    lines.append("📲 Join: https://t.me/owenzosoccerslips")
     send_long("\n".join(lines))
 
 
