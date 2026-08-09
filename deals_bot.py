@@ -10,10 +10,10 @@ CHANNEL_LINK = "https://t.me/owenzodeals"
 # Evergreen bestsellers. Links are plain search links for now;
 # once approved, swap each for YOUR tagged affiliate link.
 DEALS = [
-    {"e": "🎧", "name": "Wireless Earbuds (Bluetooth 5.3)", "note": "4.5-star bestseller, 40k+ reviews", "tag": "wireless earbuds"},
+    {"e": "🎧", "name": "Wireless Earbuds (Bluetooth 5.3)", "note": "4.5-star bestseller, 40k+ reviews", "tag": "wireless earbuds", "link": "https://s.click.aliexpress.com/e/YOUR-EARBUDS-CODE"},
     {"e": "💡", "name": "LED Strip Lights (10m, RGB)", "note": "Room makeover favourite, app control", "tag": "led strip lights"},
     {"e": "🔋", "name": "20,000mAh Portable Charger", "note": "Fast-charge, travel essential", "tag": "portable charger 20000mah"},
-    {"e": "⌚", "name": "Smart Watch (heart-rate, GPS)", "note": "Budget fitness tracker pick", "tag": "smart watch fitness"},
+    {"e": "⌚", "name": "Smart Watch (heart-rate, GPS)", "note": "Budget fitness tracker pick", "tag": "smart watch fitness", "link": "https://s.click.aliexpress.com/e/_c37hmPiL"},
     {"e": "🔊", "name": "Bluetooth Speaker (waterproof)", "note": "Top-rated portable sound", "tag": "bluetooth speaker waterproof"},
     {"e": "🧍", "name": "Adjustable Phone/Laptop Stand", "note": "Desk upgrade, 4.6-star", "tag": "laptop stand adjustable"},
     {"e": "🍳", "name": "Air Fryer (5L, digital)", "note": "Kitchen bestseller", "tag": "air fryer 5l"},
