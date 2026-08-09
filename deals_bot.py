@@ -45,7 +45,7 @@ def fmt(d):
             + d["e"] + " " + d["name"] + "\n"
             + "⭐ " + d["note"] + "\n"
             + "💰 Price drops often - check today's price:\n"
-            + "🛒 https://www.amazon.com/s?k=" + d["tag"].replace(" ", "+") + "\n\n"
+            + "🛒 " + d.get("link", "https://www.amazon.com/s?k=" + d["tag"].replace(" ", "+")) + "\n\n"
             + "📲 More free deals: " + CHANNEL_LINK)
 
 
