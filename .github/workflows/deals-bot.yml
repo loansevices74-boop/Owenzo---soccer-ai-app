@@ -1,0 +1,22 @@
+name: deals-bot
+on:
+  schedule:
+    - cron: "0 9 * * *"
+    - cron: "0 15 * * *"
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+jobs:
+  deals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: deps
+        run: pip install requests
+      - name: post deal
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_DEALS_CHAT: ${{ secrets.TG_DEALS_CHAT }}
+        run: python deals_bot.py
