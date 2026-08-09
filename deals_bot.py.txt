@@ -1,0 +1,55 @@
+# deals_bot.py - auto deals poster (GitHub Actions)
+import os
+import requests
+from datetime import datetime
+
+TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT = os.environ.get("TG_DEALS_CHAT", "")
+CHANNEL_LINK = "https://t.me/owenzodeals"
+
+# Evergreen bestsellers. Links are plain search links for now;
+# once approved, swap each for YOUR tagged affiliate link.
+DEALS = [
+    {"e": "🎧", "name": "Wireless Earbuds (Bluetooth 5.3)", "note": "4.5-star bestseller, 40k+ reviews", "tag": "wireless earbuds"},
+    {"e": "💡", "name": "LED Strip Lights (10m, RGB)", "note": "Room makeover favourite, app control", "tag": "led strip lights"},
+    {"e": "🔋", "name": "20,000mAh Portable Charger", "note": "Fast-charge, travel essential", "tag": "portable charger 20000mah"},
+    {"e": "⌚", "name": "Smart Watch (heart-rate, GPS)", "note": "Budget fitness tracker pick", "tag": "smart watch fitness"},
+    {"e": "🔊", "name": "Bluetooth Speaker (waterproof)", "note": "Top-rated portable sound", "tag": "bluetooth speaker waterproof"},
+    {"e": "🧍", "name": "Adjustable Phone/Laptop Stand", "note": "Desk upgrade, 4.6-star", "tag": "laptop stand adjustable"},
+    {"e": "🍳", "name": "Air Fryer (5L, digital)", "note": "Kitchen bestseller", "tag": "air fryer 5l"},
+    {"e": "💪", "name": "Resistance Bands Set (5)", "note": "Home gym starter", "tag": "resistance bands set"},
+    {"e": "🚗", "name": "Magnetic Car Phone Mount", "note": "One-hand click, strong grip", "tag": "magnetic car phone mount"},
+    {"e": "💧", "name": "Insulated Water Bottle (1L)", "note": "24h cold, leak-proof", "tag": "insulated water bottle 1l"},
+    {"e": "💡", "name": "Ring Light + Tripod (10in)", "note": "Creator starter kit", "tag": "ring light with tripod"},
+    {"e": "🖱️", "name": "Wireless Mouse (silent)", "note": "Office upgrade pick", "tag": "silent wireless mouse"},
+    {"e": "🛏️", "name": "Memory Foam Pillow (2-pack)", "note": "Sleep bestseller", "tag": "memory foam pillow"},
+    {"e": "🧴", "name": "Mini Blender (USB rechargeable)", "note": "Smoothies anywhere", "tag": "portable blender usb"},
+    {"e": "🎮", "name": "Phone Game Controller", "note": "Mobile gaming upgrade", "tag": "phone game controller"},
+]
+
+
+def tg_send(text):
+    if not TG_TOKEN:
+        print("[DRY RUN]\n" + text)
+        return
+    try:
+        requests.post("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
+                      json={"chat_id": TG_CHAT, "text": text,
+                            "disable_web_page_preview": True}, timeout=20)
+    except Exception as e:
+        print("TG send failed:", e)
+
+
+def fmt(d):
+    return ("🔥 DEAL OF THE DAY\n\n"
+            + d["e"] + " " + d["name"] + "\n"
+            + "⭐ " + d["note"] + "\n"
+            + "💰 Price drops often - check today's price:\n"
+            + "🛒 https://www.amazon.com/s?k=" + d["tag"].replace(" ", "+") + "\n\n"
+            + "📲 More free deals: " + CHANNEL_LINK)
+
+
+now = datetime.utcnow()
+deal = DEALS[(now.day * 24 + now.hour) % len(DEALS)]
+tg_send(fmt(deal))
+print("Posted:", deal["name"])
