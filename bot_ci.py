@@ -570,6 +570,35 @@ def fmt_slip(title, slip, total, stake):
     lines.append("Booking odds neglected. AI Fair Odds only. Paper-trade first.")
     lines.append("")
     lines.append("📲 Join: https://t.me/owenzosoccerslips")
+    return "\n".join(lines)def clean_view(l):
+    m, s = l["market"], l["selection"]
+    if m == "Over/Under 2.5":
+        return "high-scoring game expected (3+ goals)" if s.startswith("Over") else "low-scoring game expected (under 2.5 goals)"
+    if m == "BTTS":
+        return "both teams likely to score" if s.endswith("Yes") else "a clean sheet is likely for one side"
+    if m == "HT Goals":
+        return "early goal likely before half-time" if "Over" in s else "cautious first half expected"
+    if m == "Corners":
+        return "attacking game - many corners expected"
+    if m == "1X2":
+        if s == "Draw":
+            return "tight balance - a draw is possible"
+        return s[:-3].strip() + " are likely to win"
+    return s
+
+
+def fmt_clean(slip):
+    lines = ["🤖 AI MATCH ANALYSIS - " + str(datetime.today().date()),
+             "Entertainment only | 18+", "-" * 30, ""]
+    for l in slip:
+        lines.append(l.get("country", "-") + " | " + l["league"])
+        lines.append(l["match"])
+        lines.append("AI expected score: " + l["expected_score"])
+        lines.append("AI view: " + clean_view(l))
+        lines.append("")
+    lines.append("-" * 30)
+    lines.append("Full free analysis on Telegram 📲")
+    lines.append("https://t.me/owenzosoccerslips")
     return "\n".join(lines)
 
 
@@ -588,6 +617,7 @@ def post_daily():
         return
     stake = round(BANKROLL * 0.005, 2)
     send_long(fmt_slip("DAILY MIXED ACCUMULATOR - " + str(datetime.today().date()), slip, tot, stake))
+    tg_send("🎬 CLEAN VERSION (screenshot this for TikTok)\n\n" + fmt_clean(slip))
     log_slip("DAILY", slip, tot, stake, str(datetime.today().date()))
 
 
