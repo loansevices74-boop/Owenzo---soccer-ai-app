@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: deps
-        run: pip install requests
+        run: pip install requests Pillow
       - name: run bot
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
