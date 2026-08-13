@@ -1,0 +1,29 @@
+name: euro-bot
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  euro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: deps
+        run: pip install requests
+      - name: run
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_EURO_CHAT: ${{ secrets.TG_EURO_CHAT }}
+        run: python euro_bot.py
+      - name: save db
+        run: |
+          git config user.name "euro-bot"
+          git config user.email "bot@local"
+          git add -f euro.db
+          git diff --cached --quiet || { git commit -m "euro tracking update"; git push; }
