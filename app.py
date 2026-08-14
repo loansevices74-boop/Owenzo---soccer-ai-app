@@ -732,7 +732,7 @@ st.caption("v6 Dixon-Coles model • fact-check → team analysis → expected s
 
 with st.sidebar:
     st.header("🎛️ Controls")
-    start_date = st.date_input("Start date (from the 7th)", datetime(2026, 8, 7).date())
+    start_date = st.date_input("Start date (auto = today)", datetime.today().date())
     days = st.slider("Window (days)", 1, 10, 7)
     bankroll = st.number_input("Bankroll", 100, 100000, 1000, step=100)
     coverage = st.multiselect("Coverage universe (your menu)",
