@@ -171,7 +171,7 @@ def render():
                 "O1.5": f"{int(po15*100)}%", "O2.5": f"{int(po25*100)}%",
                 "BTTS": f"{int(pbtts*100)}%", "TOP PICK": f"{pick} ({int(conf*100)}%)",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows))
     if shown == 0:
         st.info("Waiting for fixture data from the API...")
 
@@ -183,7 +183,7 @@ def render():
     else:
         picks = matrix_picks()
         if picks:
-            st.dataframe(pd.DataFrame(picks), use_container_width=True)
+            st.dataframe(pd.DataFrame(picks))
         else:
             st.info("No matrix tags fired today — selectivity = quality.")
 
