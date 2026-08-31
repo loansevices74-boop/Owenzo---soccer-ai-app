@@ -115,7 +115,7 @@ with t1:
         st.markdown(f"### 📅 All fixtures — {d} ({len(rows)} analysed)")
         show = [{k: r[k] for k in ("League", "Match", "1", "X", "2", "O1.5",
                                    "O2.5", "BTTS", "TOP PICK", "CONF")} for r in rows[:25]]
-        st.dataframe(pd.DataFrame(show))
+        st.table(pd.DataFrame(show))
 
         stake = round(bankroll * 0.005, 2)
         legs, prod = [], 1.0
@@ -154,7 +154,7 @@ with t2:
     if df is None or df.empty:
         st.info("Graded results sync from the Telegram bot after each matchday.")
     else:
-        st.dataframe(df)
+        st.table(df)
         for col in ("profit", "pnl", "return"):
             if col in df.columns:
                 st.metric("Total P/L", round(pd.to_numeric(df[col], errors="coerce").sum(), 2))
