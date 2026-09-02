@@ -229,6 +229,149 @@ with t2:
 
 # ================= TAB 3: EURO HUB =================
 with t3:
+    # ================= EURO DAILY BOARD (add-on, self-contained) =================
+    import time as _eht, requests as _ehr
+    from math import exp as _ehe, factorial as _ehf
+    from datetime import datetime as _ehd
+
+    _EH_API = "https://www.thesportsdb.com/api/v1/json/3"
+    _EH_L = {"🏴 EPL": 4328, "🇪🇸 La Liga": 4335, "🇮🇹 Serie A": 4332,
+             "🇩🇪 Bundesliga": 4331, "🇫🇷 Ligue 1": 4334, "🇳🇱 Eredivisie": 4337,
+             "🇵 Primeira Liga": 4344, "🏴 Scottish Prem": 4346, "🇸 Allsvenskan": 4348,
+             "🇳🇴 Eliteserien": 4349, "🇩🇰 Superliga": 4350, "🇨🇭 Swiss Super": 4351,
+             "🇦🇹 Austrian Bund": 4352, "🇧🇪 Belgian Pro": 4353, "🇹🇷 Süper Lig": 4354,
+             "🇬🇷 Greek Super": 4355, "🇵🇱 Ekstraklasa": 4362, "🇭🇷 Croatian HNL": 4363,
+             "🇺🇦 Ukrainian PL": 4364}
+
+    @st.cache_data(ttl=6 * 3600)
+    def _eh_get(url):
+        for _ in range(3):
+            try:
+                r = _ehr.get(url, timeout=20)
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                _eht.sleep(2)
+        return {}
+
+    def _eh_form(res, team):
+        g = []
+        for e in res:
+            h, a = e.get("strHomeTeam"), e.get("strAwayTeam")
+            hs, as_ = e.get("intHomeScore"), e.get("intAwayScore")
+            if team in (h, a) and hs not in (None, "") and as_ not in (None, ""):
+                try:
+                    hs, as_ = int(hs), int(as_)
+                except Exception:
+                    continue
+                g.append((hs, as_) if team == h else (as_, hs))
+        g = g[-6:]
+        n = len(g)
+        if n == 0:
+            return 1.3, 1.3, 0
+        w = [1.0, .85, .72, .61, .52, .44][:n]
+        gf = sum(x * wi for (x, y), wi in zip(g, w)) / sum(w)
+        ga = sum(y * wi for (x, y), wi in zip(g, w)) / sum(w)
+        return (gf * n + 3.9) / (n + 3), (ga * n + 3.9) / (n + 3), n
+
+    def _eh_stats(res):
+        out = {}
+        for e in res:
+            for s in ("H", "A"):
+                t = e.get("strHomeTeam") if s == "H" else e.get("strAwayTeam")
+                gs = e.get("intHomeScore") if s == "H" else e.get("intAwayScore")
+                gc = e.get("intAwayScore") if s == "H" else e.get("intHomeScore")
+                if t and gs not in (None, ""):
+                    x, y, n = out.get(t, (0.0, 0.0, 0))
+                    out[t] = (x + int(gs), y + int(gc), n + 1)
+        return {t: (x / n, y / n, n) for t, (x, y, n) in out.items() if n >= 2}
+
+    def _eh_sp(lh, la):
+        ph = pd = pa = o15 = o25 = bt = 0.0
+        for i in range(7):
+            for j in range(7):
+                p = (_ehe(-lh) * lh ** i / _ehf(i)) * (_ehe(-la) * la ** j / _ehf(j))
+                if i > j: ph += p
+                elif i == j: pd += p
+                else: pa += p
+                if i + j >= 2: o15 += p
+                if i + j >= 3: o25 += p
+                if i >= 1 and j >= 1: bt += p
+        return ph, pd, pa, o15, o25, bt
+
+    def _eh_md(hd, rows):
+        out = ["| " + " | ".join(hd) + " |", "|" + "---|" * len(hd)]
+        for r in rows:
+            out.append("| " + " | ".join(str(x) for x in r) + " |")
+        return "\n".join(out)
+
+    def _eh_board():
+        st.subheader("🇪 European Leagues — Daily Prediction Board")
+        today = _ehd.utcnow().strftime("%Y-%m-%d")
+        shown = 0
+        for name, lid in _EH_L.items():
+            fx = _eh_get(f"{_EH_API}/eventsnextleague.php?id={lid}").get("events") or []
+            if not fx:
+                continue
+            res = _eh_get(f"{_EH_API}/eventspastleague.php?id={lid}").get("events") or []
+            shown += 1
+            st.markdown(f"### {name}")
+            rows = []
+            for e in fx[:6]:
+                h, a = e.get("strHomeTeam"), e.get("strAwayTeam")
+                dd = "🔴 TODAY" if (e.get("dateEvent") or "") == today else (e.get("dateEvent") or "")
+                hgf, hga, nh = _eh_form(res, h)
+                agf, aga, na = _eh_form(res, a)
+                lh = min(3.2, max(0.4, (hgf + aga) / 2 * 1.15))
+                la = min(3.2, max(0.4, (agf + hga) / 2 * 0.92))
+                ph, pd, pa, o15, o25, bt = _eh_sp(lh, la)
+                c = [("Home", ph), ("Draw", pd), ("Away", pa),
+                     ("O1.5", o15), ("O2.5", o25), ("BTTS", bt)]
+                pk, pv = max(c, key=lambda x: x[1])
+                rows.append([dd, f"{h} vs {a}", f"{int(ph*100)}%", f"{int(pd*100)}%",
+                             f"{int(pa*100)}%", f"{int(o15*100)}%", f"{int(o25*100)}%",
+                             f"{int(bt*100)}%", f"{pk} ({int(pv*100)}%)"])
+            st.markdown(_eh_md(["Date", "Match", "1", "X", "2", "O1.5", "O2.5", "BTTS", "TOP PICK"], rows))
+        if shown == 0:
+            st.info("Waiting for fixture data...")
+        mw = int((_ehd.now() - _ehd(2026, 8, 14)).days // 7) + 1
+        st.markdown(f"### 🎯 Euro Matrix Picks (Matchweek {mw})")
+        if mw < 3:
+            st.info(f"Matrix activates at MW3. Currently MW{mw}.")
+        else:
+            picks = []
+            for name, lid in _EH_L.items():
+                stats = _eh_stats(_eh_get(f"{_EH_API}/eventspastleague.php?id={lid}").get("events") or [])
+                for e in (_eh_get(f"{_EH_API}/eventsnextleague.php?id={lid}").get("events") or [])[:6]:
+                    h, a = e.get("strHomeTeam"), e.get("strAwayTeam")
+                    if h not in stats or a not in stats:
+                        continue
+                    hg, hc, _ = stats[h]
+                    ag, ac, _ = stats[a]
+                    if hg >= 1.2 and ag >= 1.2 and hc >= 0.8 and ac >= 0.8 and hg + ag >= 2.8:
+                        picks.append([e.get("dateEvent") or "", name, f"{h} vs {a}", "Over 1.5", "85-95%"])
+                    if hg >= 1.5 and ag >= 1.5 and hc >= 1.0 and ac >= 1.0 and hg + ag >= 3.2:
+                        picks.append([e.get("dateEvent") or "", name, f"{h} vs {a}", "Over 2.5", "85-90%"])
+                    if abs(hg - ag) <= 0.3 and hc < 1.0 and ac < 1.0 and hg <= 1.5 and ag <= 1.5:
+                        picks.append([e.get("dateEvent") or "", name, f"{h} vs {a}", "Draw", "80-89%"])
+            if picks:
+                st.markdown(_eh_md(["Date", "League", "Match", "PICK", "CONF"], picks))
+            else:
+                st.info("No matrix tags fired today — selectivity = quality.")
+        st.markdown("### 🧠 Early-Season Clusters (live)")
+        for name, lid in _EH_L.items():
+            stats = _eh_stats(_eh_get(f"{_EH_API}/eventspastleague.php?id={lid}").get("events") or [])
+            at = [t for t, (gf, ga, n) in stats.items() if gf >= 1.5 or (gf >= 1.2 and ga >= 1.0)]
+            fo = [t for t, (gf, ga, n) in stats.items() if ga <= 0.8 and gf <= 1.3]
+            if at or fo:
+                st.markdown(f"**{name}** — 🔥 {', '.join(at[:6]) or '—'} | 🧱 {', '.join(fo[:6]) or '—'}")
+
+    try:
+        _eh_board()
+        st.divider()
+    except Exception:
+        st.warning("Euro board refreshing...")
+    # ================= end EURO DAILY BOARD =================
     st.subheader("🇪🇺 European Leagues — Daily Prediction Board")
     st.caption("Top 8 + all tracked European leagues • 🔴 TODAY on matchdays")
     today = datetime.utcnow().strftime("%Y-%m-%d")
