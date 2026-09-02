@@ -534,4 +534,4 @@ with tab_predict:
                     "Fixture": f"{home} vs {away}",
                     "Pick": sig["outcome"],
                     "Confidence": f"{sig['confidence']*100:.0f}%",
-                    "Odds": f"{odds:.2f}",
+                    "Odds": f"{odds:.2f}",)}
