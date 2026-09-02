@@ -534,4 +534,113 @@ with tab_predict:
                     "Fixture": f"{home} vs {away}",
                     "Pick": sig["outcome"],
                     "Confidence": f"{sig['confidence']*100:.0f}%",
-                    "Odds": f"{odds:.2f}",)}
+                    "Odds": f"{odds:.2f}",
+                    "Fact-check": "✅" if passed else "⚠️",
+                    "Why": "; ".join(reasons) if reasons else "Model estimate",
+                })
+
+            st.markdown(md_table(pd.DataFrame(rows)))
+
+            # Build a slip from the top fact-checked picks
+            picks = []
+            for fx in fixtures[:12]:
+                home = fx.get("strHomeTeam", "?")
+                away = fx.get("strAwayTeam", "?")
+                home_data = _team_signal(home)
+                away_data = _team_signal(away)
+                h2h = _h2h(home, away)
+                sig = compute_match_signals(home_data, away_data)
+                passed, _ = fact_check(
+                    sig["outcome"], h2h,
+                    _form_streak(home_data), _form_streak(away_data),
+                )
+                if passed and sig["confidence"] >= 0.55:
+                    picks.append({
+                        "fixture": f"{home} vs {away}",
+                        "outcome": sig["outcome"],
+                        "confidence": sig["confidence"],
+                        "odds": _estimate_odds(sig["probs"], sig["outcome"]),
+                        "fact_checked": True,
+                    })
+
+            slip = build_slip(picks)
+            if slip and slip["legs"]:
+                st.markdown("### 📋 Today's Value Slip")
+                st.markdown(md_table(pd.DataFrame([
+                    {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
+                     "Odds": f"{p['odds']:.2f}",
+                     "Confidence": f"{p['confidence']*100:.0f}%"}
+                    for i, p in enumerate(slip["legs"])
+                ])))
+                st.markdown(
+                    f"**Combined odds:** {slip['combined_odds']}  |  "
+                    f"**Stake:** {slip['stake']}  |  "
+                    f"**Potential return:** {slip['potential_return']}  |  "
+                    f"**Avg confidence:** {slip['avg_confidence']*100:.0f}%"
+                )
+            else:
+                st.info("No picks passed the fact-check threshold today.")
+
+    st.markdown(
+        "---\n*Confidence is a **model estimate** capped at 78% — it is not a "
+        "guarantee of outcome. Football is inherently unpredictable.*"
+    )
+
+# ---------------------------------------------------------------------------
+# Tab 2 — Tracker & ROI
+# ---------------------------------------------------------------------------
+with tab_tracker:
+    st.subheader("📊 Tracker & ROI")
+
+    df, has_date, date_col = load_slips()
+    if df.empty:
+        st.info("No graded slips found yet. Results will appear here once slips are graded.")
+    else:
+        pnl = compute_pnl_summary(df, has_date)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Daily P/L", f"{pnl['daily']:+.2f}")
+        c2.metric("Weekly P/L", f"{pnl['weekly']:+.2f}")
+        c3.metric("Monthly P/L", f"{pnl['monthly']:+.2f}")
+        c4.metric("Total P/L", f"{pnl['total']:+.2f}")
+
+        c5, c6, c7 = st.columns(3)
+        c5.metric("Slips", pnl["slips"])
+        c6.metric("Wins", pnl["wins"])
+        c7.metric("Losses", pnl["losses"])
+
+        if pnl["has_date"]:
+            st.markdown("### 📈 Recent Daily Trend (last 14 days)")
+            st.markdown(md_table(pnl["trend"]))
+        else:
+            st.caption(
+                "No date column detected in the slips table — showing totals only. "
+                "Add a `date` column to enable daily/weekly/monthly grouping."
+            )
+
+        st.markdown("### All Slips")
+        show = df.copy()
+        if "_profit" in show.columns:
+            show["P/L"] = show["_profit"].round(2)
+        st.dataframe(show)
+
+# ---------------------------------------------------------------------------
+# Tab 3 — Euro Hub
+# ---------------------------------------------------------------------------
+with tab_euro:
+    st.subheader("🏆 Euro Hub")
+    st.markdown(
+        "European competition context and fixtures. "
+        "*(Kept from v8 — extend with Euro fixtures/standings as needed.)*"
+    )
+
+# ---------------------------------------------------------------------------
+# Footer disclaimer
+# ---------------------------------------------------------------------------
+st.markdown(
+    "---\n"
+    "**Disclaimer:** This tool provides probabilistic model estimates for "
+    "entertainment and analysis. It does **not** guarantee results and is "
+    "**not** financial or betting advice. No model can achieve 100% accuracy. "
+    "Only bet what you can afford to lose."
+)
