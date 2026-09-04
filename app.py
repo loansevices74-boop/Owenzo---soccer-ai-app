@@ -1,7 +1,6 @@
 """
-Owenzõ Soccer AI Vip-01 — FINAL
-Tabs 1-3 PUBLIC (free) | Tabs 4-7 VIP (login required)
-Honesty: probabilistic model estimates (capped 78%), never guarantees.
+Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
+Fixes: admin-only API key | correct branding | real team data (ID lookup)
 """
 import os, math, hashlib, secrets, sqlite3
 from datetime import datetime
@@ -26,8 +25,8 @@ ODDS_SPORT_KEYS = {"English Premier League": "soccer_epl", "La Liga": "soccer_sp
                    "Ligue 1": "soccer_france_ligue_one"}
 LEAGUE_IDS = {"English Premier League": "4328", "La Liga": "4335", "Serie A": "4332",
               "Bundesliga": "4331", "Ligue 1": "4334"}
+LEAGUES = list(LEAGUE_IDS.keys())
 
-# ---------------- helpers ----------------
 def _as_list(v):
     return v if isinstance(v, list) else []
 
@@ -304,8 +303,9 @@ def _defensive_strength(conceded, played):
     return max(0.0, min(1.0, 1.0 - (conceded / max(1, played)) / 3.0))
 
 def compute_match_signals(home, away, league_avg=1.35):
-    mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0))
-    mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0))
+    # FIX: home-advantage factors so matches are never symmetric
+    mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0)) * 1.12
+    mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0)) * 0.94
     probs = _poisson_joint(mu_home, mu_away)
     p_home = sum(p for (h, a), p in probs.items() if h > a)
     p_draw = sum(p for (h, a), p in probs.items() if h == a)
@@ -324,7 +324,18 @@ def compute_match_signals(home, away, league_avg=1.35):
         raw += 0.01 * (hs_ - as_)
     return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP, max(0.0, raw)), 3), "probs": probs}
 
-# ---------------- data layer (FIXED: dict-guards) ----------------
+# ---------------- data layer (FIXED: name -> team ID -> real results) ----------------
+@st.cache_data(ttl=24 * 3600)
+def _team_id(name):
+    data = _api_get(API_BASE, "searchteams.php", {"t": name})
+    teams = _as_list((data or {}).get("teams"))
+    for t in teams:
+        if isinstance(t, dict) and (t.get("strTeam") or "").lower() == str(name).lower():
+            return str(t.get("idTeam"))
+    if teams and isinstance(teams[0], dict) and teams[0].get("idTeam"):
+        return str(teams[0].get("idTeam"))
+    return None
+
 def _team_result(ev):
     if not isinstance(ev, dict):
         return None
@@ -335,16 +346,20 @@ def _team_result(ev):
         return None
     return {"home": home, "away": away, "hs": hs, "as": as_}
 
-def _fetch_recent_results(team_name, limit=10):
+@st.cache_data(ttl=6 * 3600)
+def _fetch_recent_results(team_name):
     results = []
-    for params in ({"id": team_name}, {"t": team_name}):
+    tid = _team_id(team_name)
+    attempts = [{"id": tid}] if tid else []
+    attempts += [{"id": team_name}, {"t": team_name}]
+    for params in attempts:
         for ev in _as_list((_api_get(API_BASE, "eventslast.php", params) or {}).get("results")):
             parsed = _team_result(ev)
             if parsed:
                 results.append(parsed)
         if results:
             break
-    return results[:limit]
+    return results[:10]
 
 def _build_team_signal(team_name, results):
     sig = {"form": [], "attack": 1.0, "defence": 1.0,
@@ -422,7 +437,12 @@ def _analyze(home, away, cache):
     ad = _build_team_signal(away, cache[away])
     h2h = _h2h(home, away, cache[home] + cache[away])
     sig = compute_match_signals(hd, ad)
+    low = hd["games_played"] == 0 or ad["games_played"] == 0
+    if low:
+        sig["confidence"] = round(min(sig["confidence"], 0.5), 3)
     passed, reasons = fact_check(sig["outcome"], h2h, _form_streak(hd.get("form", [])), _form_streak(ad.get("form", [])))
+    if low:
+        reasons.append("⚠️ Limited recent data — estimate only")
     return sig, passed, reasons
 
 # ---------------- TheOddsAPI ----------------
@@ -538,7 +558,7 @@ def backtest_metrics(results):
             "avg_odds": round(avg_odds, 2), "pnl": round(pnl, 2), "roi": round(pnl / n, 4) if n else 0.0}
 
 # ================= UI =================
-st.set_page_config(page_title="Owenzõ Soccer AI Vip-01", layout="wide")
+st.set_page_config(page_title="Owenzo Football AI", layout="wide")
 _ensure_default_admin()
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -546,7 +566,7 @@ if "logged_in" not in st.session_state:
 if "settings" not in st.session_state:
     st.session_state["settings"] = load_settings()
 
-st.title("⚽ Owenzõ Soccer AI Vip-01")
+st.title("⚽ Owenzo Football AI — Live Prediction Engine")
 st.caption("Poisson + recency-weighted form model with fact-check layer and real market-odds value feed. **Predictions are probabilistic model estimates — NOT guarantees.** Bet responsibly.")
 if st.session_state["logged_in"]:
     st.caption(f"👤 Signed in as **{st.session_state['username']}**")
@@ -555,12 +575,12 @@ if st.session_state["logged_in"]:
         st.session_state["username"] = None
         st.rerun()
 else:
-    st.caption("🔓 Tabs 1-3 are FREE • 🔒 Tabs 4-7 are VIP — sign in inside the tab")
+    st.caption("🔓 Tabs 1-3 are FREE • 🔒 Tabs 4-7 are **Owenzõ Soccer AI Vip-01** — sign in inside the tab")
 
 def _vip_gate(key):
     if st.session_state["logged_in"]:
         return True
-    st.warning("🔒 VIP area — sign in to access.")
+    st.warning("🔒 **Owenzõ Soccer AI Vip-01** — VIP area, sign in to access.")
     with st.form("login_" + key):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -579,17 +599,17 @@ tab_predict, tab_tracker, tab_euro, tab_value, tab_daily2, tab_bankroll, tab_bac
 # ---- TAB 1 (PUBLIC) ----
 with tab_predict:
     st.subheader("🔮 Predict & Slips")
-    league = st.selectbox("League", list(LEAGUE_IDS.keys()), key="predict_league")
+    league = st.selectbox("League", LEAGUES, key="predict_league")
     if st.button("Generate Predictions", type="primary"):
         with st.spinner("Fetching fixtures & building model signals..."):
             fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[league]}) or {}).get("events"))
         if not fixtures:
             st.info("No upcoming fixtures found for this league right now.")
         else:
-            rows = []; picks = []
+            rows = []; picks = []; cache = {}
             for fx in fixtures[:12]:
                 home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                sig, passed, reasons = _analyze(home, away, {})
+                sig, passed, reasons = _analyze(home, away, cache)
                 odds = _estimate_odds(sig["probs"], sig["outcome"])
                 rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
                              "Confidence": f"{sig['confidence']*100:.0f}%", "Odds": f"{odds:.2f}",
@@ -628,10 +648,10 @@ with tab_tracker:
         if pnl["has_date"]:
             st.markdown("### 📈 Recent Daily Trend (last 14 days)")
             st.markdown(md_table(pnl["trend"]))
-        st.markdown("### All Slips")
         show = df.copy()
         if "_profit" in show.columns:
             show["P/L"] = show["_profit"].round(2)
+        st.markdown("### All Slips")
         st.markdown(md_table(show))
 
 # ---- TAB 3 (PUBLIC) ----
@@ -642,11 +662,15 @@ with tab_euro:
 # ---- TAB 4 (VIP) ----
 with tab_value:
     if _vip_gate("value"):
-        st.subheader("💎 Value Bets (Real Market Odds)")
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 💎 Value Bets (Real Market Odds)")
         with st.expander("⚙️ Odds API Settings"):
-            odds_key_input = st.text_input("TheOddsAPI key (the-odds-api.com)", value=get_odds_api_key(), type="password")
-            if odds_key_input:
-                st.session_state["odds_api_key"] = odds_key_input
+            if is_admin(st.session_state.get("username")):
+                odds_key_input = st.text_input("TheOddsAPI key (the-odds-api.com)", value=get_odds_api_key(), type="password")
+                if odds_key_input:
+                    st.session_state["odds_api_key"] = odds_key_input
+                st.caption("🔐 Key visible to admin only. For permanent private storage, add OWENZO_ODDS_API_KEY to Streamlit Secrets.")
+            else:
+                st.caption("✅ Live market odds feed: **active** (managed by owner).")
             region = st.selectbox("Odds region", ["eu", "uk", "us"], index=0)
         with st.expander("💰 Bankroll & Betting Settings"):
             _s = st.session_state["settings"]
@@ -661,19 +685,19 @@ with tab_value:
                 for k, v in st.session_state["settings"].items():
                     save_setting(k, v)
                 st.success("Betting settings saved.")
-        value_league = st.selectbox("League (odds)", list(LEAGUE_IDS.keys()), key="value_league")
+        value_league = st.selectbox("League (odds)", LEAGUES, key="value_league")
         api_key = get_odds_api_key()
         if not api_key:
-            st.warning("No TheOddsAPI key set. Paste it in ⚙️ settings above. Falling back to estimated odds.")
+            st.warning("No TheOddsAPI key set. Falling back to estimated odds.")
         if st.button("Find Value Bets", type="primary"):
             market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(value_league, "soccer_epl"), region=region) if api_key else []
             fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[value_league]}) or {}).get("events"))
             if not market:
                 st.info("No real market odds available. Showing model-estimated odds instead.")
-            rows = []; picks = []
+            rows = []; picks = []; cache = {}
             for fx in fixtures[:12]:
                 home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                sig, passed, _ = _analyze(home, away, {})
+                sig, passed, _ = _analyze(home, away, cache)
                 market_odds = next((m["home_odds"] for m in market
                                     if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
                 if market_odds:
@@ -712,9 +736,9 @@ with tab_value:
 # ---- TAB 5 (VIP) ----
 with tab_daily2:
     if _vip_gate("daily2"):
-        st.subheader("🎯 Daily 2-Odds")
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds")
         st.caption("2 strongest picks whose combined odds land closest to 2.0 (range 1.8–2.2). Probabilistic estimate — not guaranteed.")
-        d2_league = st.selectbox("Select league (2-odds)", list(LEAGUE_IDS.keys()), key="d2_league")
+        d2_league = st.selectbox("Select league (2-odds)", LEAGUES, key="d2_league")
         if st.button("Build Daily 2-Odds", type="primary"):
             with st.spinner("Scanning fixtures..."):
                 fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[d2_league]}) or {}).get("events"))
@@ -723,10 +747,10 @@ with tab_daily2:
             if not fixtures:
                 st.info("No upcoming fixtures found for this league right now.")
             else:
-                candidates = []
+                candidates = []; cache = {}
                 for fx in fixtures[:12]:
                     home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                    sig, passed, _ = _analyze(home, away, {})
+                    sig, passed, _ = _analyze(home, away, cache)
                     if not passed or sig["confidence"] < 0.5:
                         continue
                     odds = next((m["home_odds"] for m in market
@@ -751,7 +775,7 @@ with tab_daily2:
 # ---- TAB 6 (VIP) ----
 with tab_bankroll:
     if _vip_gate("bankroll"):
-        st.subheader("💰 Bankroll Growth")
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 💰 Bankroll Growth")
         stats = bankroll_stats()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Current bankroll", f"{stats['current']:.2f}")
@@ -791,9 +815,9 @@ with tab_bankroll:
 # ---- TAB 7 (VIP) ----
 with tab_backtest:
     if _vip_gate("backtest"):
-        st.subheader("🧪 Backtest Mode")
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🧪 Backtest Mode")
         st.caption("Simulate the strategy on historical fixtures. Needs 500–1,000+ bets to be statistically meaningful. Past performance ≠ future results.")
-        bt_league = st.selectbox("League (backtest)", list(LEAGUE_IDS.keys()), key="bt_league")
+        bt_league = st.selectbox("League (backtest)", LEAGUES, key="bt_league")
         bt_season = st.text_input("Season (e.g. 2024-2025)", value="2024-2025")
         bt_limit = st.slider("Max fixtures to backtest", 20, 300, 100, 10)
         if st.button("Run Backtest", type="primary"):
@@ -814,7 +838,7 @@ with tab_backtest:
                     st.markdown("### Sample backtested bets")
                     st.markdown(md_table(pd.DataFrame(results[:20])))
 
-# ---- Account & Admin (logged-in only) ----
+# ---- Account & Admin ----
 if st.session_state["logged_in"]:
     with st.expander("🔐 My Account"):
         st.markdown("Change your own password (requires current password).")
