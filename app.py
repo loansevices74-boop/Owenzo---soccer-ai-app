@@ -1,21 +1,14 @@
 """
-============================================================================
- Owenzõ Soccer AI Vip-01
-============================================================================
- Single-file Streamlit app. Seven tabs:
-   1) Predict & Slips  2) Tracker & ROI  3) Euro Hub  4) Value Bets
-   5) Daily 2-Odds     6) Bankroll       7) Backtest
- Data: TheSportsDB + TheOddsAPI + local SQLite (soccer_tracker.db, owenzo_auth.db)
- HONESTY: predictions are probabilistic model estimates (capped 78%), never guarantees.
-============================================================================
+Owenzõ Soccer AI Vip-01 — FINAL
+Tabs 1-3 PUBLIC (free) | Tabs 4-7 VIP (login required)
+Honesty: probabilistic model estimates (capped 78%), never guarantees.
 """
-import os, re, math, hashlib, secrets, sqlite3
-from datetime import datetime, timedelta
+import os, math, hashlib, secrets, sqlite3
+from datetime import datetime
 import requests
 import pandas as pd
 import streamlit as st
 
-# ---------------- Configuration ----------------
 API_BASE = "https://www.thesportsdb.com/api/v1/json/3"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 DB_NAME = os.environ.get("OWENZO_DB", "soccer_tracker.db")
@@ -28,31 +21,24 @@ DEFAULT_BANKROLL = 1000.0
 CONFIDENCE_CAP = 0.78
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASS = "owenzo2026"
-ODDS_SPORT_KEYS = {
-    "English Premier League": "soccer_epl",
-    "La Liga": "soccer_spain_la_liga",
-    "Serie A": "soccer_italy_serie_a",
-    "Bundesliga": "soccer_germany_bundesliga",
-    "Ligue 1": "soccer_france_ligue_one",
-}
-LEAGUE_IDS = {"English Premier League": "4328", "La Liga": "4335",
-              "Serie A": "4332", "Bundesliga": "4331", "Ligue 1": "4334"}
+ODDS_SPORT_KEYS = {"English Premier League": "soccer_epl", "La Liga": "soccer_spain_la_liga",
+                   "Serie A": "soccer_italy_serie_a", "Bundesliga": "soccer_germany_bundesliga",
+                   "Ligue 1": "soccer_france_ligue_one"}
+LEAGUE_IDS = {"English Premier League": "4328", "La Liga": "4335", "Serie A": "4332",
+              "Bundesliga": "4331", "Ligue 1": "4334"}
 
-# ---------------- Helpers ----------------
+# ---------------- helpers ----------------
+def _as_list(v):
+    return v if isinstance(v, list) else []
+
 def md_table(df):
     if df is None or df.empty:
         return "_No data._"
     cols = [str(c) for c in df.columns]
-    header = "| " + " | ".join(cols) + " |"
-    sep = "|" + "|".join(["---"] * len(cols)) + "|"
-    rows = []
+    out = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
     for _, r in df.iterrows():
-        cells = []
-        for c in cols:
-            v = r[c]
-            cells.append("" if pd.isna(v) else str(v).replace("|", "\\|"))
-        rows.append("| " + " | ".join(cells) + " |")
-    return "\n".join([header, sep] + rows)
+        out.append("| " + " | ".join("" if pd.isna(r[c]) else str(r[c]).replace("|", "\\|") for c in cols) + " |")
+    return "\n".join(out)
 
 def _safe_float(v, default=0.0):
     try:
@@ -70,13 +56,11 @@ def _api_get(base, path, params=None, timeout=12):
         st.warning(f"API error ({path}): {exc}")
         return {}
 
-# ---------------- Authentication ----------------
+# ---------------- auth ----------------
 def _auth_connect():
     conn = sqlite3.connect(AUTH_DB)
     conn.row_factory = sqlite3.Row
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY, pass_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user', created_at TEXT)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pass_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', created_at TEXT)")
     conn.commit()
     return conn
 
@@ -95,7 +79,7 @@ def _verify_password(password, stored):
 def _ensure_default_admin():
     conn = _auth_connect()
     if conn.execute("SELECT 1 FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)).fetchone() is None:
-        conn.execute("INSERT INTO users (username, pass_hash, role, created_at) VALUES (?,?,?,?)",
+        conn.execute("INSERT INTO users VALUES (?,?,?,?)",
                      (DEFAULT_ADMIN_USER, _hash_password(DEFAULT_ADMIN_PASS), "admin", datetime.now().isoformat()))
         conn.commit()
     conn.close()
@@ -121,7 +105,7 @@ def list_users():
 def add_user(username, password, role="user"):
     conn = _auth_connect()
     try:
-        conn.execute("INSERT INTO users (username, pass_hash, role, created_at) VALUES (?,?,?,?)",
+        conn.execute("INSERT INTO users VALUES (?,?,?,?)",
                      (username, _hash_password(password), role, datetime.now().isoformat()))
         conn.commit()
         return True
@@ -160,9 +144,9 @@ def admin_set_password(username, new_password):
     conn.commit()
     conn.close()
 
-# ---------------- Settings ----------------
-SETTINGS_DEFAULTS = {"stake_pct": STAKE_PCT, "edge_threshold": 0.05,
-                     "bankroll": DEFAULT_BANKROLL, "max_legs": MAX_LEGS, "max_odds": MAX_ODDS}
+# ---------------- settings & bets ----------------
+SETTINGS_DEFAULTS = {"stake_pct": STAKE_PCT, "edge_threshold": 0.05, "bankroll": DEFAULT_BANKROLL,
+                     "max_legs": MAX_LEGS, "max_odds": MAX_ODDS}
 
 def _settings_connect():
     conn = sqlite3.connect(AUTH_DB)
@@ -190,43 +174,24 @@ def save_setting(key, value):
     except Exception:
         pass
 
-# ---------------- Bankroll / bets ----------------
 BETS_TABLE = "bets"
 
 def _bets_connect():
     conn = sqlite3.connect(AUTH_DB)
     conn.row_factory = sqlite3.Row
-    conn.execute(f"""CREATE TABLE IF NOT EXISTS {BETS_TABLE} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT,
-        fixture TEXT, pick TEXT, odds REAL, stake REAL,
-        result TEXT DEFAULT 'pending', pnl REAL DEFAULT 0.0, running_balance REAL)""")
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {BETS_TABLE} (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT, fixture TEXT, pick TEXT, odds REAL, stake REAL, result TEXT DEFAULT 'pending', pnl REAL DEFAULT 0.0, running_balance REAL)")
     conn.commit()
     return conn
 
 def record_bet(username, fixture, pick, odds, stake, result="pending"):
     conn = _bets_connect()
-    cur = conn.execute(
-        f"INSERT INTO {BETS_TABLE} (username, timestamp, fixture, pick, odds, stake, result, pnl, running_balance) VALUES (?,?,?,?,?,?,?,?,?)",
-        (username, datetime.now().isoformat(), fixture, pick, odds, stake, result, 0.0, 0.0))
+    cur = conn.execute(f"INSERT INTO {BETS_TABLE} (username, timestamp, fixture, pick, odds, stake, result, pnl, running_balance) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (username, datetime.now().isoformat(), fixture, pick, odds, stake, result, 0.0, 0.0))
     conn.commit()
     bet_id = cur.lastrowid
     conn.close()
     _recompute_running_balance()
     return bet_id
-
-def update_bet_result(bet_id, result):
-    conn = _bets_connect()
-    row = conn.execute(f"SELECT * FROM {BETS_TABLE} WHERE id = ?", (bet_id,)).fetchone()
-    if row is None:
-        conn.close()
-        return False
-    stake = _safe_float(row["stake"]); odds = _safe_float(row["odds"], 1.0)
-    pnl = stake * (odds - 1.0) if result == "win" else (-stake if result == "loss" else 0.0)
-    conn.execute(f"UPDATE {BETS_TABLE} SET result = ?, pnl = ? WHERE id = ?", (result, round(pnl, 2), bet_id))
-    conn.commit()
-    conn.close()
-    _recompute_running_balance()
-    return True
 
 def _recompute_running_balance():
     conn = _bets_connect()
@@ -257,10 +222,9 @@ def bankroll_stats():
     settled = wins + losses
     return {"current": round(start + total_pnl, 2), "total_pnl": round(total_pnl, 2),
             "wins": wins, "losses": losses, "pending": pending,
-            "win_rate": round(wins / settled, 4) if settled else 0.0,
-            "bets": len(bets), "start": start}
+            "win_rate": round(wins / settled, 4) if settled else 0.0, "bets": len(bets), "start": start}
 
-# ---------------- Slips DB ----------------
+# ---------------- slips DB ----------------
 def load_slips():
     if not os.path.exists(DB_NAME):
         return pd.DataFrame(), False, None
@@ -293,8 +257,8 @@ def load_slips():
     return df, has_date, date_col
 
 def compute_pnl_summary(df, has_date):
-    empty = {"daily": 0.0, "weekly": 0.0, "monthly": 0.0, "total": 0.0,
-             "wins": 0, "losses": 0, "slips": 0, "trend": pd.DataFrame(), "has_date": has_date}
+    empty = {"daily": 0.0, "weekly": 0.0, "monthly": 0.0, "total": 0.0, "wins": 0,
+             "losses": 0, "slips": 0, "trend": pd.DataFrame(), "has_date": has_date}
     if df is None or df.empty:
         return empty
     total = float(df["_profit"].sum())
@@ -307,27 +271,23 @@ def compute_pnl_summary(df, has_date):
     d["_day"] = d["_date"].dt.normalize()
     d["_week"] = d["_date"].dt.to_period("W").apply(lambda x: x.start_time)
     d["_month"] = d["_date"].dt.to_period("M").apply(lambda x: x.start_time)
-    daily = float(d[d["_day"] == today]["_profit"].sum())
-    weekly = float(d[d["_week"] >= today - pd.Timedelta(days=today.weekday())]["_profit"].sum())
-    monthly = float(d[d["_month"] >= today.replace(day=1)]["_profit"].sum())
-    trend = (d.groupby("_day")["_profit"].sum().reset_index()
-             .sort_values("_day", ascending=False).head(14))
+    trend = d.groupby("_day")["_profit"].sum().reset_index().sort_values("_day", ascending=False).head(14)
     trend.columns = ["Date", "P/L"]
     trend["Date"] = trend["Date"].dt.strftime("%Y-%m-%d")
     trend["P/L"] = trend["P/L"].round(2)
-    return {"daily": daily, "weekly": weekly, "monthly": monthly, "total": total,
-            "wins": wins, "losses": losses, "slips": slips, "trend": trend, "has_date": has_date}
+    return {"daily": float(d[d["_day"] == today]["_profit"].sum()),
+            "weekly": float(d[d["_week"] >= today - pd.Timedelta(days=today.weekday())]["_profit"].sum()),
+            "monthly": float(d[d["_month"] >= today.replace(day=1)]["_profit"].sum()),
+            "total": total, "wins": wins, "losses": losses, "slips": slips,
+            "trend": trend, "has_date": has_date}
 
-# ---------------- Model ----------------
+# ---------------- model ----------------
 def _poisson_pmf(k, lam):
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
 
 def _poisson_joint(mu_home, mu_away, max_goals=8):
     return {(i, j): _poisson_pmf(i, mu_home) * _poisson_pmf(j, mu_away)
             for i in range(max_goals + 1) for j in range(max_goals + 1)}
-
-def _expected_goals(atk, dfn, avg):
-    return max(0.05, avg * atk * dfn)
 
 def _form_streak(form):
     if not form:
@@ -344,8 +304,8 @@ def _defensive_strength(conceded, played):
     return max(0.0, min(1.0, 1.0 - (conceded / max(1, played)) / 3.0))
 
 def compute_match_signals(home, away, league_avg=1.35):
-    mu_home = _expected_goals(_safe_float(home.get("attack", 1.0), 1.0), _safe_float(away.get("defence", 1.0), 1.0), league_avg)
-    mu_away = _expected_goals(_safe_float(away.get("attack", 1.0), 1.0), _safe_float(home.get("defence", 1.0), 1.0), league_avg)
+    mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0))
+    mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0))
     probs = _poisson_joint(mu_home, mu_away)
     p_home = sum(p for (h, a), p in probs.items() if h > a)
     p_draw = sum(p for (h, a), p in probs.items() if h == a)
@@ -362,13 +322,12 @@ def compute_match_signals(home, away, league_avg=1.35):
         raw += 0.02 * as_ - 0.02 * hs_ + 0.02 * aa - 0.02 * hh + 0.02 * ad - 0.02 * hd
     else:
         raw += 0.01 * (hs_ - as_)
-    return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP, max(0.0, raw)), 3),
-            "probs": probs,
-            "signals": {"poisson_home": round(p_home, 3), "poisson_draw": round(p_draw, 3),
-                        "poisson_away": round(p_away, 3), "mu_home": round(mu_home, 2), "mu_away": round(mu_away, 2)}}
+    return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP, max(0.0, raw)), 3), "probs": probs}
 
-# ---------------- Data layer ----------------
+# ---------------- data layer (FIXED: dict-guards) ----------------
 def _team_result(ev):
+    if not isinstance(ev, dict):
+        return None
     home = ev.get("strHomeTeam") or ""
     away = ev.get("strAwayTeam") or ""
     hs = _safe_float(ev.get("intHomeScore"), -1); as_ = _safe_float(ev.get("intAwayScore"), -1)
@@ -379,8 +338,7 @@ def _team_result(ev):
 def _fetch_recent_results(team_name, limit=10):
     results = []
     for params in ({"id": team_name}, {"t": team_name}):
-        data = _api_get(API_BASE, "eventslast.php", params)
-        for ev in (data or {}).get("results") or []:
+        for ev in _as_list((_api_get(API_BASE, "eventslast.php", params) or {}).get("results")):
             parsed = _team_result(ev)
             if parsed:
                 results.append(parsed)
@@ -390,9 +348,8 @@ def _fetch_recent_results(team_name, limit=10):
 
 def _build_team_signal(team_name, results):
     sig = {"form": [], "attack": 1.0, "defence": 1.0,
-           "record": {"home": {"wins": 0, "draws": 0, "losses": 0},
-                      "away": {"wins": 0, "draws": 0, "losses": 0}},
-           "goals_scored": 0, "goals_conceded": 0, "games_played": 0, "league_gpg": 1.35}
+           "record": {"home": {"wins": 0, "draws": 0, "losses": 0}, "away": {"wins": 0, "draws": 0, "losses": 0}},
+           "goals_scored": 0, "goals_conceded": 0, "games_played": 0}
     if not results:
         return sig
     gf = ga = played = 0.0
@@ -412,17 +369,15 @@ def _build_team_signal(team_name, results):
             sig["form"].append("L"); sig["record"][key]["losses"] += 1
         else:
             sig["form"].append("D"); sig["record"][key]["draws"] += 1
-    sig["games_played"] = played
-    sig["goals_scored"] = gf
-    sig["goals_conceded"] = ga
+    sig["games_played"] = played; sig["goals_scored"] = gf; sig["goals_conceded"] = ga
     if played > 0:
         sig["attack"] = max(0.2, (gf / played) / 1.35)
         sig["defence"] = max(0.2, (ga / played) / 1.35)
     return sig
 
-def _h2h(home, away, results_pool=None):
+def _h2h(home, away, pool=None):
     h2h = {"home_wins": 0, "away_wins": 0, "draws": 0, "meetings": 0}
-    for r in (results_pool or []):
+    for r in (pool or []):
         if {r["home"], r["away"]} != {home, away}:
             continue
         h2h["meetings"] += 1
@@ -458,6 +413,18 @@ def _estimate_odds(probs, outcome):
         p = sum(x for (h, a), x in probs.items() if h == a)
     return round(1.0 / max(0.05, min(0.95, p)), 2)
 
+def _analyze(home, away, cache):
+    if home not in cache:
+        cache[home] = _fetch_recent_results(home)
+    if away not in cache:
+        cache[away] = _fetch_recent_results(away)
+    hd = _build_team_signal(home, cache[home])
+    ad = _build_team_signal(away, cache[away])
+    h2h = _h2h(home, away, cache[home] + cache[away])
+    sig = compute_match_signals(hd, ad)
+    passed, reasons = fact_check(sig["outcome"], h2h, _form_streak(hd.get("form", [])), _form_streak(ad.get("form", [])))
+    return sig, passed, reasons
+
 # ---------------- TheOddsAPI ----------------
 def get_odds_api_key():
     key = os.environ.get("OWENZO_ODDS_API_KEY", "")
@@ -473,32 +440,31 @@ def get_odds_api_key():
 def fetch_market_odds(api_key, sport_key, region="eu", market="h2h"):
     if not api_key:
         return []
-    params = {"apiKey": api_key, "regions": region, "markets": market, "oddsFormat": "decimal"}
-    data = _api_get(ODDS_API_BASE, f"sports/{sport_key}/odds", params)
-    if not isinstance(data, list):
-        return []
-    fixtures = []
-    for ev in data:
+    data = _api_get(ODDS_API_BASE, f"sports/{sport_key}/odds",
+                    {"apiKey": api_key, "regions": region, "markets": market, "oddsFormat": "decimal"})
+    out = []
+    for ev in _as_list(data):
+        if not isinstance(ev, dict):
+            continue
         home, away = ev.get("home_team", ""), ev.get("away_team", "")
         if not home or not away:
             continue
-        h2h_odds = None
-        for bm in ev.get("bookmakers", []) or []:
-            for mkt in bm.get("markets", []) or []:
+        hodds = None
+        for bm in _as_list(ev.get("bookmakers")):
+            for mkt in _as_list(bm.get("markets")):
                 if mkt.get("key") != "h2h":
                     continue
-                for out in mkt.get("outcomes", []) or []:
-                    if out.get("name") == home:
-                        h2h_odds = _safe_float(out.get("price"), 0.0)
-        if h2h_odds and h2h_odds > 1.0:
-            fixtures.append({"home": home, "away": away, "home_odds": h2h_odds,
-                             "commence_time": ev.get("commence_time", "")})
-    return fixtures
+                for o in _as_list(mkt.get("outcomes")):
+                    if o.get("name") == home:
+                        hodds = _safe_float(o.get("price"), 0.0)
+        if hodds and hodds > 1.0:
+            out.append({"home": home, "away": away, "home_odds": hodds})
+    return out
 
 def market_implied_prob(odds):
     return 1.0 / odds if odds and odds > 1.0 else 0.0
 
-# ---------------- Slip builders ----------------
+# ---------------- slip builders ----------------
 def build_slip(picks, bankroll=DEFAULT_BANKROLL, stake_pct=STAKE_PCT, max_legs=MAX_LEGS, max_odds=MAX_ODDS):
     legs = [p for p in picks if p.get("fact_checked") is not False][:max_legs]
     if not legs:
@@ -534,33 +500,23 @@ def build_daily_odds(picks, target=2.0, lo=1.8, hi=2.2):
     _, _, i, j, comb, avg_conf = best
     return {"legs": [picks[i], picks[j]], "combined_odds": round(comb, 2), "avg_confidence": round(avg_conf, 3)}
 
-# ---------------- Backtest ----------------
+# ---------------- backtest ----------------
 def fetch_historical_fixtures(league_id, season="2024-2025", limit=200):
     data = _api_get(API_BASE, "eventsseason.php", {"id": league_id, "s": season})
     out = []
-    for ev in (data or {}).get("events", []) or []:
+    for ev in _as_list((data or {}).get("events")):
+        if not isinstance(ev, dict):
+            continue
         home, away = ev.get("strHomeTeam", ""), ev.get("strAwayTeam", "")
         hs, as_ = _safe_float(ev.get("intHomeScore"), -1), _safe_float(ev.get("intAwayScore"), -1)
         if home and away and hs >= 0 and as_ >= 0:
             out.append({"home": home, "away": away, "hs": hs, "as": as_})
     return out[:limit]
 
-def _analyze(home, away, cache):
-    if home not in cache:
-        cache[home] = _fetch_recent_results(home)
-    if away not in cache:
-        cache[away] = _fetch_recent_results(away)
-    hd = _build_team_signal(home, cache[home])
-    ad = _build_team_signal(away, cache[away])
-    h2h = _h2h(home, away, cache[home] + cache[away])
-    sig = compute_match_signals(hd, ad)
-    passed, _ = fact_check(sig["outcome"], h2h, _form_streak(hd.get("form", [])), _form_streak(ad.get("form", [])))
-    return sig, passed
-
 def run_backtest(fixtures, min_confidence=0.5):
     results = []; cache = {}
     for fx in fixtures:
-        sig, passed = _analyze(fx["home"], fx["away"], cache)
+        sig, passed, _ = _analyze(fx["home"], fx["away"], cache)
         if not passed or sig["confidence"] < min_confidence:
             continue
         odds = _estimate_odds(sig["probs"], sig["outcome"])
@@ -577,11 +533,9 @@ def backtest_metrics(results):
         return None
     wins = sum(1 for r in results if r["Result"] == "W")
     avg_odds = sum(r["Odds"] for r in results) / n
-    total_return = sum(r["Odds"] if r["Result"] == "W" else 0.0 for r in results)
-    pnl = total_return - n
+    pnl = sum(r["Odds"] if r["Result"] == "W" else 0.0 for r in results) - n
     return {"bets": n, "wins": wins, "losses": n - wins, "hit_rate": round(wins / n, 4),
-            "avg_odds": round(avg_odds, 2), "pnl": round(pnl, 2),
-            "roi": round(pnl / n, 4) if n else 0.0}
+            "avg_odds": round(avg_odds, 2), "pnl": round(pnl, 2), "roi": round(pnl / n, 4) if n else 0.0}
 
 # ================= UI =================
 st.set_page_config(page_title="Owenzõ Soccer AI Vip-01", layout="wide")
@@ -592,49 +546,50 @@ if "logged_in" not in st.session_state:
 if "settings" not in st.session_state:
     st.session_state["settings"] = load_settings()
 
-if not st.session_state["logged_in"]:
-    st.title("🔐 Owenzõ Soccer AI Vip-01")
-    st.caption("Please sign in to access the prediction platform.")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign In")
-    if submitted:
-        if authenticate(username, password):
-            st.session_state["logged_in"] = True
-            st.session_state["username"] = username
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
-    st.stop()
-
 st.title("⚽ Owenzõ Soccer AI Vip-01")
 st.caption("Poisson + recency-weighted form model with fact-check layer and real market-odds value feed. **Predictions are probabilistic model estimates — NOT guarantees.** Bet responsibly.")
-col_h, col_l = st.columns([5, 1])
-with col_l:
+if st.session_state["logged_in"]:
+    st.caption(f"👤 Signed in as **{st.session_state['username']}**")
     if st.button("Logout"):
         st.session_state["logged_in"] = False
         st.session_state["username"] = None
         st.rerun()
+else:
+    st.caption("🔓 Tabs 1-3 are FREE • 🔒 Tabs 4-7 are VIP — sign in inside the tab")
+
+def _vip_gate(key):
+    if st.session_state["logged_in"]:
+        return True
+    st.warning("🔒 VIP area — sign in to access.")
+    with st.form("login_" + key):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign In"):
+            if authenticate(u, p):
+                st.session_state["logged_in"] = True
+                st.session_state["username"] = u
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+    return False
 
 tab_predict, tab_tracker, tab_euro, tab_value, tab_daily2, tab_bankroll, tab_backtest = st.tabs(
-    ["Predict & Slips", "Tracker & ROI", "Euro Hub", "Value Bets", "Daily 2-Odds", "Bankroll", "Backtest"])
+    ["Predict & Slips", "Tracker & ROI", "Euro Hub", "🔒 Value Bets", "🔒 Daily 2-Odds", "🔒 Bankroll", "🔒 Backtest"])
 
-# ---- Tab 1 ----
+# ---- TAB 1 (PUBLIC) ----
 with tab_predict:
     st.subheader("🔮 Predict & Slips")
     league = st.selectbox("League", list(LEAGUE_IDS.keys()), key="predict_league")
     if st.button("Generate Predictions", type="primary"):
         with st.spinner("Fetching fixtures & building model signals..."):
-            data = _api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[league]})
-            fixtures = (data or {}).get("events", []) or []
+            fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[league]}) or {}).get("events"))
         if not fixtures:
             st.info("No upcoming fixtures found for this league right now.")
         else:
             rows = []; picks = []
             for fx in fixtures[:12]:
                 home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                sig, passed = _analyze(home, away, {})
+                sig, passed, reasons = _analyze(home, away, {})
                 odds = _estimate_odds(sig["probs"], sig["outcome"])
                 rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
                              "Confidence": f"{sig['confidence']*100:.0f}%", "Odds": f"{odds:.2f}",
@@ -657,7 +612,7 @@ with tab_predict:
                 st.info("No picks passed the fact-check threshold today.")
     st.markdown("---\n*Confidence is a model estimate capped at 78% — not a guarantee.*")
 
-# ---- Tab 2 ----
+# ---- TAB 2 (PUBLIC) ----
 with tab_tracker:
     st.subheader("📊 Tracker & ROI")
     df, has_date, date_col = load_slips()
@@ -679,235 +634,238 @@ with tab_tracker:
             show["P/L"] = show["_profit"].round(2)
         st.markdown(md_table(show))
 
-# ---- Tab 3 ----
+# ---- TAB 3 (PUBLIC) ----
 with tab_euro:
     st.subheader("🏆 Euro Hub")
     st.markdown("European competition context and fixtures.")
 
-# ---- Tab 4 ----
+# ---- TAB 4 (VIP) ----
 with tab_value:
-    st.subheader("💎 Value Bets (Real Market Odds)")
-    with st.expander("⚙️ Odds API Settings"):
-        odds_key_input = st.text_input("TheOddsAPI key (the-odds-api.com)", value=get_odds_api_key(), type="password")
-        if odds_key_input:
-            st.session_state["odds_api_key"] = odds_key_input
-        region = st.selectbox("Odds region", ["eu", "uk", "us"], index=0)
-    with st.expander("💰 Bankroll & Betting Settings"):
-        _s = st.session_state["settings"]
-        stake_pct = st.slider("Stake % of bankroll", 0.1, 5.0, float(_s["stake_pct"]) * 100, 0.1) / 100.0
-        edge_thr = st.slider("Edge threshold", 0.01, 0.20, float(_s["edge_threshold"]), 0.01)
-        bankroll = st.number_input("Starting bankroll", min_value=10.0, value=float(_s["bankroll"]), step=50.0)
-        max_legs = st.slider("Max legs per slip", 1, 8, int(_s["max_legs"]))
-        max_odds = st.slider("Max combined odds", 1.5, 20.0, float(_s["max_odds"]), 0.5)
-        if st.button("Save Betting Settings"):
-            st.session_state["settings"] = {"stake_pct": stake_pct, "edge_threshold": edge_thr,
-                                            "bankroll": bankroll, "max_legs": max_legs, "max_odds": max_odds}
-            for k, v in st.session_state["settings"].items():
-                save_setting(k, v)
-            st.success("Betting settings saved.")
-    value_league = st.selectbox("League (odds)", list(LEAGUE_IDS.keys()), key="value_league")
-    api_key = get_odds_api_key()
-    if not api_key:
-        st.warning("No TheOddsAPI key set. Paste it in ⚙️ settings above or add OWENZO_ODDS_API_KEY to secrets. Falling back to estimated odds.")
-    if st.button("Find Value Bets", type="primary"):
-        market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(value_league, "soccer_epl"), region=region) if api_key else []
-        data = _api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[value_league]})
-        fixtures = (data or {}).get("events", []) or []
-        if not market:
-            st.info("No real market odds available. Showing model-estimated odds instead.")
-        rows = []; picks = []
-        for fx in fixtures[:12]:
-            home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-            sig, passed = _analyze(home, away, {})
-            market_odds = next((m["home_odds"] for m in market
-                                if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
-            if market_odds:
-                market_prob = market_implied_prob(market_odds)
-                edge = sig["confidence"] - market_prob
-                is_value = edge >= float(st.session_state["settings"]["edge_threshold"])
-                rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
-                             "Model prob": f"{sig['confidence']*100:.0f}%", "Market odds": f"{market_odds:.2f}",
-                             "Market implied": f"{market_prob*100:.0f}%", "Edge": f"{edge*100:+.1f}%",
-                             "Value": "✅" if is_value else "—"})
-                if is_value and passed:
-                    picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                                  "confidence": sig["confidence"], "odds": market_odds, "fact_checked": True})
-            else:
-                est = _estimate_odds(sig["probs"], sig["outcome"])
-                rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
-                             "Model prob": f"{sig['confidence']*100:.0f}%", "Market odds": f"{est:.2f} (est)",
-                             "Market implied": f"{market_implied_prob(est)*100:.0f}%", "Edge": "—", "Value": "—"})
-        if rows:
-            st.markdown("### Value Analysis")
-            st.markdown(md_table(pd.DataFrame(rows)))
+    if _vip_gate("value"):
+        st.subheader("💎 Value Bets (Real Market Odds)")
+        with st.expander("⚙️ Odds API Settings"):
+            odds_key_input = st.text_input("TheOddsAPI key (the-odds-api.com)", value=get_odds_api_key(), type="password")
+            if odds_key_input:
+                st.session_state["odds_api_key"] = odds_key_input
+            region = st.selectbox("Odds region", ["eu", "uk", "us"], index=0)
+        with st.expander("💰 Bankroll & Betting Settings"):
             _s = st.session_state["settings"]
-            slip = build_slip(picks, bankroll=float(_s["bankroll"]), stake_pct=float(_s["stake_pct"]),
-                              max_legs=int(_s["max_legs"]), max_odds=float(_s["max_odds"]))
-            if slip and slip["legs"]:
-                st.markdown("### 💰 Value Slip")
-                st.markdown(md_table(pd.DataFrame([
-                    {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
-                     "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
-                    for i, p in enumerate(slip["legs"])])))
-                st.markdown(f"**Combined odds:** {slip['combined_odds']} | **Stake:** {slip['stake']} | **Potential return:** {slip['potential_return']}")
-            else:
-                st.info("No value bets found above the edge threshold today.")
-    st.markdown("---\n*Value betting improves expected value over large samples — it does not guarantee wins.*")
-
-# ---- Tab 5 ----
-with tab_daily2:
-    st.subheader("🎯 Daily 2-Odds")
-    st.caption("2 strongest picks whose combined odds land closest to 2.0 (range 1.8–2.2). Probabilistic estimate — not guaranteed.")
-    d2_league = st.selectbox("Select league (2-odds)", list(LEAGUE_IDS.keys()), key="d2_league")
-    if st.button("Build Daily 2-Odds", type="primary"):
-        with st.spinner("Scanning fixtures..."):
-            data = _api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[d2_league]})
-            fixtures = (data or {}).get("events", []) or []
-            api_key = get_odds_api_key()
-            market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(d2_league, "soccer_epl")) if api_key else []
-        if not fixtures:
-            st.info("No upcoming fixtures found for this league right now.")
-        else:
-            candidates = []
+            stake_pct = st.slider("Stake % of bankroll", 0.1, 5.0, float(_s["stake_pct"]) * 100, 0.1) / 100.0
+            edge_thr = st.slider("Edge threshold", 0.01, 0.20, float(_s["edge_threshold"]), 0.01)
+            bankroll = st.number_input("Starting bankroll", min_value=10.0, value=float(_s["bankroll"]), step=50.0)
+            max_legs = st.slider("Max legs per slip", 1, 8, int(_s["max_legs"]))
+            max_odds = st.slider("Max combined odds", 1.5, 20.0, float(_s["max_odds"]), 0.5)
+            if st.button("Save Betting Settings"):
+                st.session_state["settings"] = {"stake_pct": stake_pct, "edge_threshold": edge_thr,
+                                                "bankroll": bankroll, "max_legs": max_legs, "max_odds": max_odds}
+                for k, v in st.session_state["settings"].items():
+                    save_setting(k, v)
+                st.success("Betting settings saved.")
+        value_league = st.selectbox("League (odds)", list(LEAGUE_IDS.keys()), key="value_league")
+        api_key = get_odds_api_key()
+        if not api_key:
+            st.warning("No TheOddsAPI key set. Paste it in ⚙️ settings above. Falling back to estimated odds.")
+        if st.button("Find Value Bets", type="primary"):
+            market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(value_league, "soccer_epl"), region=region) if api_key else []
+            fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[value_league]}) or {}).get("events"))
+            if not market:
+                st.info("No real market odds available. Showing model-estimated odds instead.")
+            rows = []; picks = []
             for fx in fixtures[:12]:
                 home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                sig, passed = _analyze(home, away, {})
-                if not passed or sig["confidence"] < 0.5:
-                    continue
-                odds = next((m["home_odds"] for m in market
-                             if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
-                odds = odds or _estimate_odds(sig["probs"], sig["outcome"])
-                candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                                   "confidence": sig["confidence"], "odds": odds})
-            d2 = build_daily_odds(candidates)
-            if d2:
-                _s = st.session_state["settings"]
-                stake = round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2)
-                st.markdown("### 🎯 Today's 2-Odds Accumulator")
-                st.markdown(md_table(pd.DataFrame([
-                    {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
-                     "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
-                    for i, p in enumerate(d2["legs"])])))
-                st.markdown(f"**Combined odds:** {d2['combined_odds']:.2f} | **Avg confidence:** {d2['avg_confidence']*100:.0f}% | **Stake:** {stake} | **Potential return:** {stake * d2['combined_odds']:.2f}")
-            else:
-                st.info("No pair landed in the 1.8–2.2 range today. Try another league.")
-    st.markdown("---\n*A ~2.0 accumulator can lose. Bet responsibly.*")
-
-# ---- Tab 6 ----
-with tab_bankroll:
-    st.subheader("💰 Bankroll Growth")
-    stats = bankroll_stats()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current bankroll", f"{stats['current']:.2f}")
-    c2.metric("Total P/L", f"{stats['total_pnl']:+.2f}")
-    c3.metric("Win rate", f"{stats['win_rate']*100:.1f}%")
-    c4.metric("Bets", stats["bets"])
-    bets = load_bets()
-    if bets:
-        df_bets = pd.DataFrame(bets)
-        if "running_balance" in df_bets.columns:
-            chart_df = df_bets[["timestamp", "running_balance"]].copy()
-            chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], errors="coerce")
-            chart_df = chart_df.dropna(subset=["timestamp"]).sort_values("timestamp")
-            st.markdown("### 📈 Bankroll growth over time")
-            st.line_chart(chart_df.set_index("timestamp")["running_balance"])
-        st.markdown("### All bets")
-        st.markdown(md_table(df_bets))
-    else:
-        st.info("No bets recorded yet. Use the form below to add a bet.")
-    st.markdown("### ➕ Record a bet")
-    with st.form("record_bet_form"):
-        b_fixture = st.text_input("Fixture (e.g. Arsenal vs Chelsea)")
-        b_pick = st.selectbox("Pick", ["Home", "Draw", "Away"])
-        b_odds = st.number_input("Odds", min_value=1.01, value=2.0, step=0.1)
-        _s = st.session_state["settings"]
-        b_stake = st.number_input("Stake", min_value=0.0, value=round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2), step=1.0)
-        b_result = st.selectbox("Result", ["pending", "win", "loss"])
-        b_submit = st.form_submit_button("Add bet")
-    if b_submit:
-        if b_fixture:
-            bet_id = record_bet(st.session_state["username"], b_fixture, b_pick, b_odds, b_stake, b_result)
-            st.success(f"Bet recorded (id {bet_id}).")
-            st.rerun()
-        else:
-            st.warning("Enter a fixture name.")
-
-# ---- Tab 7 ----
-with tab_backtest:
-    st.subheader("🧪 Backtest Mode")
-    st.caption("Simulate the strategy on historical fixtures. Needs 500–1,000+ bets to be statistically meaningful. Past performance ≠ future results.")
-    bt_league = st.selectbox("League (backtest)", list(LEAGUE_IDS.keys()), key="bt_league")
-    bt_season = st.text_input("Season (e.g. 2024-2025)", value="2024-2025")
-    bt_limit = st.slider("Max fixtures to backtest", 20, 300, 100, 10)
-    if st.button("Run Backtest", type="primary"):
-        with st.spinner("Fetching historical fixtures & simulating..."):
-            fixtures = fetch_historical_fixtures(LEAGUE_IDS[bt_league], bt_season, bt_limit)
-        if not fixtures:
-            st.info("No historical fixtures found for this league/season. Try another season.")
-        else:
-            results = run_backtest(fixtures)
-            if not results:
-                st.info("No picks met the confidence/fact-check bar in this sample.")
-            else:
-                m = backtest_metrics(results)
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("Bets", m["bets"]); c2.metric("Hit rate", f"{m['hit_rate']*100:.1f}%")
-                c3.metric("ROI (flat 1u)", f"{m['roi']*100:+.1f}%"); c4.metric("Avg odds", f"{m['avg_odds']:.2f}")
-                c5.metric("P/L (flat 1u)", f"{m['pnl']:+.2f}")
-                st.markdown("### Sample backtested bets")
-                st.markdown(md_table(pd.DataFrame(results[:20])))
-
-# ---- Account & Admin ----
-with st.expander("🔐 My Account"):
-    st.markdown("Change your own password (requires current password).")
-    my_cur = st.text_input("Current password", type="password", key="my_cur_pass")
-    my_new = st.text_input("New password", type="password", key="my_new_pass")
-    my_new2 = st.text_input("Confirm new password", type="password", key="my_new_pass2")
-    if st.button("Change my password"):
-        if my_new != my_new2:
-            st.error("New passwords do not match.")
-        elif len(my_new) < 6:
-            st.error("New password must be at least 6 characters.")
-        else:
-            ok, msg = change_password(st.session_state["username"], my_cur, my_new)
-            st.success(msg) if ok else st.error(msg)
-
-if is_admin(st.session_state.get("username")):
-    with st.expander("🔐 Private Admin Settings (owner only)"):
-        st.markdown("Generate access passwords for VIP users.")
-        new_username = st.text_input("New username", key="admin_new_user")
-        gen_pass = st.text_input("Generated password", value=st.session_state.get("gen_pass", ""), key="admin_gen_pass")
-        cg1, cg2 = st.columns(2)
-        if cg1.button("Generate strong password"):
-            st.session_state["gen_pass"] = generate_strong_password()
-            st.rerun()
-        if cg2.button("Add user"):
-            if new_username and gen_pass:
-                st.success(f"User '{new_username}' added.") if add_user(new_username, gen_pass) else st.error("Username already exists.")
-            else:
-                st.warning("Provide both a username and a password.")
-        st.markdown("### Current users")
-        users = list_users()
-        if users:
-            st.markdown(md_table(pd.DataFrame(users)))
-            revoke_options = [u["username"] for u in users if u["username"] != DEFAULT_ADMIN_USER]
-            if revoke_options:
-                revoke_name = st.selectbox("Revoke user", revoke_options)
-                if st.button("Revoke selected user"):
-                    if revoke_user(revoke_name):
-                        st.success(f"Revoked '{revoke_name}'.")
-                        st.rerun()
-            else:
-                st.caption("No other users yet — add your first VIP member above.")
-        st.markdown("### 🔑 Change another user's password (admin override)")
-        if users:
-            target_user = st.selectbox("User", [u["username"] for u in users], key="target_reset_user")
-            reset_pass = st.text_input("New password for user", type="password", key="admin_reset_pass")
-            if st.button("Set user password"):
-                if len(reset_pass) < 6:
-                    st.error("New password must be at least 6 characters.")
+                sig, passed, _ = _analyze(home, away, {})
+                market_odds = next((m["home_odds"] for m in market
+                                    if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
+                if market_odds:
+                    market_prob = market_implied_prob(market_odds)
+                    edge = sig["confidence"] - market_prob
+                    is_value = edge >= float(st.session_state["settings"]["edge_threshold"])
+                    rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
+                                 "Model prob": f"{sig['confidence']*100:.0f}%", "Market odds": f"{market_odds:.2f}",
+                                 "Market implied": f"{market_prob*100:.0f}%", "Edge": f"{edge*100:+.1f}%",
+                                 "Value": "✅" if is_value else "—"})
+                    if is_value and passed:
+                        picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                                      "confidence": sig["confidence"], "odds": market_odds, "fact_checked": True})
                 else:
-                    admin_set_password(target_user, reset_pass)
-                    st.success(f"Password updated for '{target_user}'.")
+                    est = _estimate_odds(sig["probs"], sig["outcome"])
+                    rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
+                                 "Model prob": f"{sig['confidence']*100:.0f}%", "Market odds": f"{est:.2f} (est)",
+                                 "Market implied": f"{market_implied_prob(est)*100:.0f}%", "Edge": "—", "Value": "—"})
+            if rows:
+                st.markdown("### Value Analysis")
+                st.markdown(md_table(pd.DataFrame(rows)))
+                _s = st.session_state["settings"]
+                slip = build_slip(picks, bankroll=float(_s["bankroll"]), stake_pct=float(_s["stake_pct"]),
+                                  max_legs=int(_s["max_legs"]), max_odds=float(_s["max_odds"]))
+                if slip and slip["legs"]:
+                    st.markdown("### 💰 Value Slip")
+                    st.markdown(md_table(pd.DataFrame([
+                        {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
+                         "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
+                        for i, p in enumerate(slip["legs"])])))
+                    st.markdown(f"**Combined odds:** {slip['combined_odds']} | **Stake:** {slip['stake']} | **Potential return:** {slip['potential_return']}")
+                else:
+                    st.info("No value bets found above the edge threshold today.")
+        st.markdown("---\n*Value betting improves expected value over large samples — it does not guarantee wins.*")
+
+# ---- TAB 5 (VIP) ----
+with tab_daily2:
+    if _vip_gate("daily2"):
+        st.subheader("🎯 Daily 2-Odds")
+        st.caption("2 strongest picks whose combined odds land closest to 2.0 (range 1.8–2.2). Probabilistic estimate — not guaranteed.")
+        d2_league = st.selectbox("Select league (2-odds)", list(LEAGUE_IDS.keys()), key="d2_league")
+        if st.button("Build Daily 2-Odds", type="primary"):
+            with st.spinner("Scanning fixtures..."):
+                fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[d2_league]}) or {}).get("events"))
+                api_key = get_odds_api_key()
+                market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(d2_league, "soccer_epl")) if api_key else []
+            if not fixtures:
+                st.info("No upcoming fixtures found for this league right now.")
+            else:
+                candidates = []
+                for fx in fixtures[:12]:
+                    home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
+                    sig, passed, _ = _analyze(home, away, {})
+                    if not passed or sig["confidence"] < 0.5:
+                        continue
+                    odds = next((m["home_odds"] for m in market
+                                 if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
+                    odds = odds or _estimate_odds(sig["probs"], sig["outcome"])
+                    candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                                       "confidence": sig["confidence"], "odds": odds})
+                d2 = build_daily_odds(candidates)
+                if d2:
+                    _s = st.session_state["settings"]
+                    stake = round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2)
+                    st.markdown("### 🎯 Today's 2-Odds Accumulator")
+                    st.markdown(md_table(pd.DataFrame([
+                        {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
+                         "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
+                        for i, p in enumerate(d2["legs"])])))
+                    st.markdown(f"**Combined odds:** {d2['combined_odds']:.2f} | **Avg confidence:** {d2['avg_confidence']*100:.0f}% | **Stake:** {stake} | **Potential return:** {stake * d2['combined_odds']:.2f}")
+                else:
+                    st.info("No pair landed in the 1.8–2.2 range today. Try another league.")
+        st.markdown("---\n*A ~2.0 accumulator can lose. Bet responsibly.*")
+
+# ---- TAB 6 (VIP) ----
+with tab_bankroll:
+    if _vip_gate("bankroll"):
+        st.subheader("💰 Bankroll Growth")
+        stats = bankroll_stats()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Current bankroll", f"{stats['current']:.2f}")
+        c2.metric("Total P/L", f"{stats['total_pnl']:+.2f}")
+        c3.metric("Win rate", f"{stats['win_rate']*100:.1f}%")
+        c4.metric("Bets", stats["bets"])
+        bets = load_bets()
+        if bets:
+            df_bets = pd.DataFrame(bets)
+            if "running_balance" in df_bets.columns:
+                chart_df = df_bets[["timestamp", "running_balance"]].copy()
+                chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], errors="coerce")
+                chart_df = chart_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+                st.markdown("### 📈 Bankroll growth over time")
+                st.line_chart(chart_df.set_index("timestamp")["running_balance"])
+            st.markdown("### All bets")
+            st.markdown(md_table(df_bets))
+        else:
+            st.info("No bets recorded yet. Use the form below to add a bet.")
+        st.markdown("### ➕ Record a bet")
+        with st.form("record_bet_form"):
+            b_fixture = st.text_input("Fixture (e.g. Arsenal vs Chelsea)")
+            b_pick = st.selectbox("Pick", ["Home", "Draw", "Away"])
+            b_odds = st.number_input("Odds", min_value=1.01, value=2.0, step=0.1)
+            _s = st.session_state["settings"]
+            b_stake = st.number_input("Stake", min_value=0.0, value=round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2), step=1.0)
+            b_result = st.selectbox("Result", ["pending", "win", "loss"])
+            b_submit = st.form_submit_button("Add bet")
+        if b_submit:
+            if b_fixture:
+                bet_id = record_bet(st.session_state["username"], b_fixture, b_pick, b_odds, b_stake, b_result)
+                st.success(f"Bet recorded (id {bet_id}).")
+                st.rerun()
+            else:
+                st.warning("Enter a fixture name.")
+
+# ---- TAB 7 (VIP) ----
+with tab_backtest:
+    if _vip_gate("backtest"):
+        st.subheader("🧪 Backtest Mode")
+        st.caption("Simulate the strategy on historical fixtures. Needs 500–1,000+ bets to be statistically meaningful. Past performance ≠ future results.")
+        bt_league = st.selectbox("League (backtest)", list(LEAGUE_IDS.keys()), key="bt_league")
+        bt_season = st.text_input("Season (e.g. 2024-2025)", value="2024-2025")
+        bt_limit = st.slider("Max fixtures to backtest", 20, 300, 100, 10)
+        if st.button("Run Backtest", type="primary"):
+            with st.spinner("Fetching historical fixtures & simulating..."):
+                fixtures = fetch_historical_fixtures(LEAGUE_IDS[bt_league], bt_season, bt_limit)
+            if not fixtures:
+                st.info("No historical fixtures found for this league/season. Try another season.")
+            else:
+                results = run_backtest(fixtures)
+                if not results:
+                    st.info("No picks met the confidence/fact-check bar in this sample.")
+                else:
+                    m = backtest_metrics(results)
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Bets", m["bets"]); c2.metric("Hit rate", f"{m['hit_rate']*100:.1f}%")
+                    c3.metric("ROI (flat 1u)", f"{m['roi']*100:+.1f}%"); c4.metric("Avg odds", f"{m['avg_odds']:.2f}")
+                    c5.metric("P/L (flat 1u)", f"{m['pnl']:+.2f}")
+                    st.markdown("### Sample backtested bets")
+                    st.markdown(md_table(pd.DataFrame(results[:20])))
+
+# ---- Account & Admin (logged-in only) ----
+if st.session_state["logged_in"]:
+    with st.expander("🔐 My Account"):
+        st.markdown("Change your own password (requires current password).")
+        my_cur = st.text_input("Current password", type="password", key="my_cur_pass")
+        my_new = st.text_input("New password", type="password", key="my_new_pass")
+        my_new2 = st.text_input("Confirm new password", type="password", key="my_new_pass2")
+        if st.button("Change my password"):
+            if my_new != my_new2:
+                st.error("New passwords do not match.")
+            elif len(my_new) < 6:
+                st.error("New password must be at least 6 characters.")
+            else:
+                ok, msg = change_password(st.session_state["username"], my_cur, my_new)
+                st.success(msg) if ok else st.error(msg)
+
+    if is_admin(st.session_state.get("username")):
+        with st.expander("🔐 Private Admin Settings (owner only)"):
+            st.markdown("Generate access passwords for VIP users.")
+            new_username = st.text_input("New username", key="admin_new_user")
+            gen_pass = st.text_input("Generated password", value=st.session_state.get("gen_pass", ""), key="admin_gen_pass")
+            cg1, cg2 = st.columns(2)
+            if cg1.button("Generate strong password"):
+                st.session_state["gen_pass"] = generate_strong_password()
+                st.rerun()
+            if cg2.button("Add user"):
+                if new_username and gen_pass:
+                    st.success(f"User '{new_username}' added.") if add_user(new_username, gen_pass) else st.error("Username already exists.")
+                else:
+                    st.warning("Provide both a username and a password.")
+            st.markdown("### Current users")
+            users = list_users()
+            if users:
+                st.markdown(md_table(pd.DataFrame(users)))
+                revoke_options = [u["username"] for u in users if u["username"] != DEFAULT_ADMIN_USER]
+                if revoke_options:
+                    revoke_name = st.selectbox("Revoke user", revoke_options)
+                    if st.button("Revoke selected user"):
+                        if revoke_user(revoke_name):
+                            st.success(f"Revoked '{revoke_name}'.")
+                            st.rerun()
+                else:
+                    st.caption("No other users yet — add your first VIP member above.")
+            if users:
+                st.markdown("### 🔑 Change another user's password (admin override)")
+                target_user = st.selectbox("User", [u["username"] for u in users], key="target_reset_user")
+                reset_pass = st.text_input("New password for user", type="password", key="admin_reset_pass")
+                if st.button("Set user password"):
+                    if len(reset_pass) < 6:
+                        st.error("New password must be at least 6 characters.")
+                    else:
+                        admin_set_password(target_user, reset_pass)
+                        st.success(f"Password updated for '{target_user}'.")
 
 st.markdown("---\n**Disclaimer:** probabilistic model estimates for entertainment/analysis only. Not financial or betting advice. Only bet what you can afford to lose.")
