@@ -1,9 +1,10 @@
 """
-Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-FINAL v8 — standings-table data layer (real varied stats, 1 call/league, no 429s)
-Tab1: Upcoming board + FULL daily slip + 7-day unlimited accumulator
+Owenzo Football AI — Upcoming Prediction Engine (v9 EXPERT)
+Public tabs 1-3 | VIP tabs 4-7 (Owenzõ Soccer AI Vip-01)
+Real per-team form via searchteams+eventslast (parallel, cached, 429-proof)
 """
-import os, math, hashlib, secrets, sqlite3, itertools, time
+import os, math, hashlib, secrets, sqlite3, itertools, time, threading
+import concurrent.futures as _cf
 from datetime import datetime
 import requests
 import pandas as pd
@@ -59,18 +60,368 @@ def _safe_float(v, default=0.0):
     except (TypeError, ValueError):
         return default
 
-def _api_get(base, path, params=None, timeout=12):
-    for attempt in range(3):
+def _polite_get(base, path, params=None, timeout=10):
+    for attempt in range(2):
         try:
             r = requests.get(f"{base}/{path}", params=params or {}, timeout=timeout)
             if r.status_code == 429:
-                time.sleep(2 * (attempt + 1))
+                time.sleep(5 * (attempt + 1))
                 continue
             r.raise_for_status()
             return r.json()
         except Exception:
             time.sleep(1)
     return {}
+
+# ---------------- EXPERT DATA LAYER: parallel, cached, 429-proof ----------------
+_MEM_LOCK = threading.Lock()
+_MEM_IDS = {}
+_MEM_RESULTS = {}
+
+def _team_id_live(name):
+    with _MEM_LOCK:
+        e = _MEM_IDS.get(name)
+        if e and time.time() - e[0] < 7 * 24 * 3600:
+            return e[1]
+    tid = None
+    d = _polite_get(API_BASE, "searchteams.php", {"t": name})
+    teams = _as_list((d or {}).get("teams"))
+    for t in teams:
+        if isinstance(t, dict) and (t.get("strTeam") or "").lower() == str(name).lower():
+            tid = str(t.get("idTeam")); break
+    if not tid and teams and isinstance(teams[0], dict) and teams[0].get("idTeam"):
+        tid = str(teams[0].get("idTeam"))
+    with _MEM_LOCK:
+        _MEM_IDS[name] = (time.time(), tid)
+    return tid
+
+def _team_result(ev):
+    if not isinstance(ev, dict):
+        return None
+    home = ev.get("strHomeTeam") or ""
+    away = ev.get("strAwayTeam") or ""
+    hs = _safe_float(ev.get("intHomeScore"), -1); as_ = _safe_float(ev.get("intAwayScore"), -1)
+    if not home or not away or hs < 0 or as_ < 0:
+        return None
+    return {"home": home, "away": away, "hs": hs, "as": as_}
+
+def _team_results_live(name):
+    with _MEM_LOCK:
+        e = _MEM_RESULTS.get(name)
+        if e and time.time() - e[0] < 24 * 3600:
+            return e[1]
+    res = []
+    tid = _team_id_live(name)
+    if tid:
+        time.sleep(0.3)
+        d = _polite_get(API_BASE, "eventslast.php", {"id": tid})
+        for ev in _as_list((d or {}).get("results")):
+            p = _team_result(ev)
+            if p:
+                res.append(p)
+    res = res[:10]
+    with _MEM_LOCK:
+        _MEM_RESULTS[name] = (time.time(), res)
+    return res
+
+def _prefetch(names):
+    names = sorted({n for n in names if n and n != "?"})
+    if not names:
+        return
+    with _cf.ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(_team_results_live, names))
+
+@st.cache_data(ttl=12 * 3600)
+def league_next(lid):
+    return _as_list((_polite_get(API_BASE, "eventsnextleague.php", {"id": lid}) or {}).get("events"))
+
+@st.cache_data(ttl=12 * 3600)
+def fixtures_on(d):
+    return _as_list((_polite_get(API_BASE, "eventsday.php", {"d": d, "s": "Soccer"}) or {}).get("events"))
+
+@st.cache_data(ttl=24 * 3600)
+def league_table(lid):
+    now = datetime.now()
+    y = now.year
+    season = f"{y}-{y+1}" if now.month >= 7 else f"{y-1}-{y}"
+    out = {}
+    for r in _as_list((_polite_get(API_BASE, "lookuptable.php", {"l": lid, "s": season}) or {}).get("table")):
+        if not isinstance(r, dict):
+            continue
+        name = r.get("name") or r.get("teamname") or ""
+        played = _safe_float(r.get("played"), 0)
+        if not name or played <= 0:
+            continue
+        out[name] = {"played": played, "gf": _safe_float(r.get("goalsfor"), 0),
+                     "ga": _safe_float(r.get("goalsagainst"), 0),
+                     "w": _safe_float(r.get("win"), 0), "d": _safe_float(r.get("draw"), 0),
+                     "l": _safe_float(r.get("loss"), 0)}
+    return out
+
+def _build_team_signal(team_name, results):
+    sig = {"form": [], "attack": 1.0, "defence": 1.0, "form_score": 0.0,
+           "record": {"home": {"wins": 0, "draws": 0, "losses": 0}, "away": {"wins": 0, "draws": 0, "losses": 0}},
+           "goals_scored": 0, "goals_conceded": 0, "games_played": 0}
+    if not results:
+        return sig
+    gf = ga = played = 0.0
+    for r in results:
+        if r["home"] == team_name:
+            gf += r["hs"]; ga += r["as"]
+            key = "home"; won, lost = r["hs"] > r["as"], r["hs"] < r["as"]
+        elif r["away"] == team_name:
+            gf += r["as"]; ga += r["hs"]
+            key = "away"; won, lost = r["as"] > r["hs"], r["as"] < r["hs"]
+        else:
+            continue
+        played += 1
+        if won:
+            sig["form"].append("W"); sig["record"][key]["wins"] += 1
+        elif lost:
+            sig["form"].append("L"); sig["record"][key]["losses"] += 1
+        else:
+            sig["form"].append("D"); sig["record"][key]["draws"] += 1
+    sig["games_played"] = played; sig["goals_scored"] = gf; sig["goals_conceded"] = ga
+    if played > 0:
+        sig["attack"] = max(0.2, (gf / played) / 1.35)
+        sig["defence"] = max(0.2, (ga / played) / 1.35)
+        sig["form_score"] = sum(1 if f == "W" else (-1 if f == "L" else 0) for f in sig["form"]) / played
+    return sig
+
+def _table_stats(table, team):
+    sig = {"form": [], "attack": 1.0, "defence": 1.0, "form_score": 0.0,
+           "record": {"home": {"wins": 0, "draws": 0, "losses": 0}, "away": {"wins": 0, "draws": 0, "losses": 0}},
+           "goals_scored": 0, "goals_conceded": 0, "games_played": 0}
+    r = table.get(team)
+    if not r:
+        return sig
+    played = r["played"]
+    sig["games_played"] = played
+    sig["goals_scored"], sig["goals_conceded"] = r["gf"], r["ga"]
+    sig["attack"] = max(0.2, (r["gf"] / played) / 1.35)
+    sig["defence"] = max(0.2, (r["ga"] / played) / 1.35)
+    sig["form_score"] = (r["w"] - r["l"]) / played
+    return sig
+
+def _stats_for(lid, team):
+    res = _team_results_live(team)
+    if res:
+        return _build_team_signal(team, res)
+    tab = league_table(lid)
+    if tab:
+        s = _table_stats(tab, team)
+        if s["games_played"] > 0:
+            return s
+    return _build_team_signal(team, [])
+
+def _h2h(home, away, pool=None):
+    h2h = {"home_wins": 0, "away_wins": 0, "draws": 0, "meetings": 0}
+    for r in (pool or []):
+        if {r["home"], r["away"]} != {home, away}:
+            continue
+        h2h["meetings"] += 1
+        if r["hs"] > r["as"]: h2h["home_wins"] += 1
+        elif r["as"] > r["hs"]: h2h["away_wins"] += 1
+        else: h2h["draws"] += 1
+    return h2h if h2h["meetings"] else None
+
+# ---------------- model ----------------
+def _poisson_pmf(k, lam):
+    return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+def _poisson_joint(mu_home, mu_away, max_goals=8):
+    return {(i, j): _poisson_pmf(i, mu_home) * _poisson_pmf(j, mu_away)
+            for i in range(max_goals + 1) for j in range(max_goals + 1)}
+
+def p_over15(probs):
+    return sum(p for (h, a), p in probs.items() if h + a >= 2)
+
+def _home_away_split(record, venue):
+    rec = record.get(venue, {})
+    w, d, l = _safe_float(rec.get("wins", 0)), _safe_float(rec.get("draws", 0)), _safe_float(rec.get("losses", 0))
+    return (w + 0.5 * d) / (w + d + l) if (w + d + l) else 0.0
+
+def compute_match_signals(home, away, league_avg=1.35):
+    mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0)) * 1.12
+    mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0)) * 0.94
+    probs = _poisson_joint(mu_home, mu_away)
+    p_home = sum(p for (h, a), p in probs.items() if h > a)
+    p_draw = sum(p for (h, a), p in probs.items() if h == a)
+    p_away = sum(p for (h, a), p in probs.items() if h < a)
+    hs_, as_ = _safe_float(home.get("form_score"), 0.0), _safe_float(away.get("form_score"), 0.0)
+    hh, aa = _home_away_split(home.get("record", {}), "home"), _home_away_split(away.get("record", {}), "away")
+    best = max([("Home", p_home), ("Draw", p_draw), ("Away", p_away)], key=lambda x: x[1])
+    raw = best[1]
+    if best[0] == "Home":
+        raw += 0.03 * hs_ - 0.03 * as_ + 0.02 * hh - 0.02 * aa
+    elif best[0] == "Away":
+        raw += 0.03 * as_ - 0.03 * hs_ + 0.02 * aa - 0.02 * hh
+    else:
+        raw += 0.01 * (hs_ - as_)
+    return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP_1X2, max(0.0, raw)), 3),
+            "probs": probs,
+            "markets": {"Home": p_home, "Draw": p_draw, "Away": p_away,
+                        "Over 1.5": p_over15(probs),
+                        "1X": p_home + p_draw, "X2": p_away + p_draw, "12": p_home + p_away}}
+
+def best_market_pick(signals):
+    markets = signals.get("markets", {})
+    if not markets:
+        return signals["outcome"], signals["confidence"], signals["confidence"]
+    capped = {}
+    for m, p in markets.items():
+        cap = CONFIDENCE_CAP_1X2 if m in ("Home", "Draw", "Away") else CONFIDENCE_CAP_SAFE
+        capped[m] = round(min(cap, max(0.0, p)), 3)
+    name, cp = max(capped.items(), key=lambda x: x[1])
+    return name, cp, markets.get(name, cp)
+
+def fact_check(pick, h2h, home_form, away_form):
+    reasons = []; passed = True
+    if pick in ("Home", "Draw", "Away"):
+        if h2h:
+            hw, aw, dr = h2h.get("home_wins", 0), h2h.get("away_wins", 0), h2h.get("draws", 0)
+            if pick == "Home" and aw > hw:
+                reasons.append(f"H2H favours away ({aw}-{hw})"); passed = False
+            elif pick == "Away" and hw > aw:
+                reasons.append(f"H2H favours home ({hw}-{aw})"); passed = False
+            else:
+                reasons.append(f"H2H balanced ({hw}-{dr}-{aw})")
+        if pick == "Home" and home_form < 0.0:
+            reasons.append("Home team in poor recent form"); passed = False
+        elif pick == "Away" and away_form < 0.0:
+            reasons.append("Away team in poor recent form"); passed = False
+        else:
+            reasons.append("Recent form supports the pick")
+    elif pick == "Over 1.5":
+        reasons.append("High-scoring trend supports Over 1.5")
+    else:
+        reasons.append("Double chance covers safer outcomes")
+    return passed, reasons
+
+def _estimate_odds_from_prob(p):
+    return round(1.0 / max(0.05, min(0.95, p)), 2)
+
+def _analyze(home, away, lid):
+    hd = _stats_for(lid, home)
+    ad = _stats_for(lid, away)
+    h2h = _h2h(home, away, _team_results_live(home) + _team_results_live(away))
+    sig = compute_match_signals(hd, ad)
+    best_pick, best_conf, raw_p = best_market_pick(sig)
+    low = hd["games_played"] == 0 or ad["games_played"] == 0
+    if low:
+        best_conf = round(min(best_conf, 0.5), 3)
+    passed, reasons = fact_check(best_pick, h2h, hd["form_score"], ad["form_score"])
+    return {"outcome": best_pick, "confidence": best_conf, "probs": sig["probs"],
+            "markets": sig["markets"], "market_prob": raw_p}, passed
+
+# ---------------- boards ----------------
+@st.cache_data(ttl=3600)
+def daily_board():
+    fx_by_lg = {}
+    names = []
+    for lg in LEAGUES:
+        fxs = league_next(EURO_LEAGUES[lg])[:3]
+        fx_by_lg[lg] = fxs
+        for fx in fxs:
+            names += [fx.get("strHomeTeam"), fx.get("strAwayTeam")]
+    _prefetch(names)
+    rows = []; picks = []; cands = []
+    for lg in LEAGUES:
+        for fx in fx_by_lg[lg]:
+            home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
+            dd = fx.get("dateEvent") or ""
+            sig, passed = _analyze(home, away, EURO_LEAGUES[lg])
+            odds = _estimate_odds_from_prob(sig["market_prob"])
+            rows.append({"Date": dd, "League": lg, "Match": f"{home} vs {away}",
+                         "Pick": sig["outcome"], "Confidence": f"{sig['confidence']*100:.0f}%",
+                         "Odds": f"{odds:.2f}", "Fact-check": "✅" if passed else "⚠️"})
+            cand = {"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                    "confidence": sig["confidence"], "odds": odds, "fact_checked": passed, "league": lg}
+            cands.append(cand)
+            if passed and sig["confidence"] >= 0.55:
+                picks.append(cand)
+    rows.sort(key=lambda r: (r["Date"] or "9999", -int(r["Confidence"][:-1])))
+    picks.sort(key=lambda p: -p["confidence"])
+    return rows, picks, cands
+
+@st.cache_data(ttl=6 * 3600)
+def weekly_slip_board():
+    from datetime import timedelta as _td
+    day_evs = {}
+    names = []
+    for off in range(7):
+        d = (datetime.utcnow() + _td(days=off)).strftime("%Y-%m-%d")
+        evs = [e for e in fixtures_on(d)
+               if isinstance(e, dict) and _safe_float(e.get("idLeague"), 0) in EURO_IDS][:4]
+        day_evs[d] = evs
+        for e in evs:
+            names += [e.get("strHomeTeam"), e.get("strAwayTeam")]
+    _prefetch(names)
+    rows = []; acc_picks = []
+    for d, evs in day_evs.items():
+        day_picks = []
+        for e in evs:
+            home, away = e.get("strHomeTeam"), e.get("strAwayTeam")
+            lid = int(_safe_float(e.get("idLeague"), 0))
+            lg = e.get("strLeague") or ""
+            if not home or not away:
+                continue
+            sig, passed = _analyze(home, away, lid)
+            if sig["confidence"] < 0.55:
+                continue
+            if sig["outcome"] in ("Home", "Draw", "Away") and not passed:
+                continue
+            odds = _estimate_odds_from_prob(sig["market_prob"])
+            day_picks.append({"Date": d, "League": lg, "Match": f"{home} vs {away}",
+                              "Pick": sig["outcome"], "conf": sig["confidence"], "Odds": odds})
+        day_picks.sort(key=lambda p: -p["conf"])
+        for p in day_picks[:2]:
+            rows.append({"Date": p["Date"], "League": p["League"], "Match": p["Match"],
+                         "Pick": p["Pick"], "Confidence": f"{p['conf']*100:.0f}%",
+                         "Odds": f"{p['Odds']:.2f}"})
+            acc_picks.append(p)
+    if not rows:
+        return None
+    acc_picks.sort(key=lambda p: -p["conf"])
+    comb = 1.0
+    for p in acc_picks:
+        comb *= p["Odds"]
+    acc = {"legs": [{"fixture": p["Match"], "outcome": p["Pick"], "confidence": p["conf"],
+                     "odds": p["Odds"], "league": p["League"]} for p in acc_picks],
+           "combined_odds": round(comb, 2),
+           "avg_confidence": sum(p["conf"] for p in acc_picks) / len(acc_picks)}
+    return {"rows": rows, "acc": acc}
+
+def build_target_odds(picks, target=2.0, lo=1.8, hi=2.2, max_legs=6):
+    top = sorted([p for p in picks if p.get("fact_checked") is not False], key=lambda p: -p["confidence"])[:18]
+    best = None
+    for k in range(2, max_legs + 1):
+        for combo in itertools.combinations(top, k):
+            comb = 1.0
+            ok = True
+            for p in combo:
+                comb *= _safe_float(p.get("odds", 1.0), 1.0)
+                if comb > hi:
+                    ok = False
+                    break
+            if not ok or comb < lo:
+                continue
+            avg_conf = sum(p["confidence"] for p in combo) / k
+            cand = (abs(comb - target), -avg_conf)
+            if best is None or cand < best[0]:
+                best = (cand, list(combo), comb, avg_conf)
+    if best is None:
+        return None
+    _, legs, comb, avg_conf = best
+    return {"legs": legs, "combined_odds": round(comb, 2), "avg_confidence": round(avg_conf, 3)}
+
+def daily_2odds():
+    _, _, cands = daily_board()
+    top = sorted(cands, key=lambda p: -p["confidence"])[:10]
+    top_rows = [{"#": i + 1, "League": p["league"], "Match": p["fixture"],
+                 "Best Market": p["outcome"], "Confidence": f"{p['confidence']*100:.0f}%",
+                 "Odds": f"{p['odds']:.2f}"} for i, p in enumerate(top)]
+    return top_rows, build_target_odds(cands)
 
 # ---------------- auth ----------------
 def _auth_connect():
@@ -326,277 +677,6 @@ def compute_pnl_summary(df, has_date):
             "total": total, "wins": wins, "losses": losses, "slips": slips,
             "trend": trend, "has_date": has_date}
 
-# ---------------- DATA LAYER v8: official league tables (real stats, 1 call/league) ----------------
-def current_season():
-    now = datetime.now()
-    y = now.year
-    return f"{y}-{y+1}" if now.month >= 7 else f"{y-1}-{y}"
-
-@st.cache_data(ttl=24 * 3600)
-def league_table(lid):
-    data = _api_get(API_BASE, "lookuptable.php", {"l": lid, "s": current_season()})
-    out = {}
-    for r in _as_list((data or {}).get("table")):
-        if not isinstance(r, dict):
-            continue
-        name = r.get("name") or r.get("teamname") or ""
-        played = _safe_float(r.get("played"), 0)
-        if not name or played <= 0:
-            continue
-        out[name] = {"played": played,
-                     "gf": _safe_float(r.get("goalsfor"), 0), "ga": _safe_float(r.get("goalsagainst"), 0),
-                     "w": _safe_float(r.get("win"), 0), "d": _safe_float(r.get("draw"), 0),
-                     "l": _safe_float(r.get("loss"), 0)}
-    return out
-
-@st.cache_data(ttl=12 * 3600)
-def league_past(lid):
-    return _as_list((_api_get(API_BASE, "eventspastleague.php", {"id": lid}) or {}).get("events"))
-
-@st.cache_data(ttl=12 * 3600)
-def league_next(lid):
-    return _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": lid}) or {}).get("events"))
-
-@st.cache_data(ttl=12 * 3600)
-def fixtures_on(d):
-    return _as_list((_api_get(API_BASE, "eventsday.php", {"d": d, "s": "Soccer"}) or {}).get("events"))
-
-def _table_team_stats(table, team):
-    sig = {"form": [], "attack": 1.0, "defence": 1.0, "form_score": 0.0,
-           "record": {"home": {"wins": 0, "draws": 0, "losses": 0}, "away": {"wins": 0, "draws": 0, "losses": 0}},
-           "goals_scored": 0, "goals_conceded": 0, "games_played": 0}
-    r = table.get(team)
-    if not r:
-        return sig
-    played = r["played"]
-    sig["games_played"] = played
-    sig["goals_scored"], sig["goals_conceded"] = r["gf"], r["ga"]
-    sig["attack"] = max(0.2, (r["gf"] / played) / 1.35)
-    sig["defence"] = max(0.2, (r["ga"] / played) / 1.35)
-    sig["form_score"] = (r["w"] - r["l"]) / played
-    hw, hd, hl = round(r["w"] * 0.55), round(r["d"] * 0.5), round(r["l"] * 0.45)
-    sig["record"] = {"home": {"wins": hw, "draws": hd, "losses": hl},
-                     "away": {"wins": r["w"] - hw, "draws": r["d"] - hd, "losses": r["l"] - hl}}
-    return sig
-
-def _pool_team_stats(pool, team):
-    sig = {"form": [], "attack": 1.0, "defence": 1.0, "form_score": 0.0,
-           "record": {"home": {"wins": 0, "draws": 0, "losses": 0}, "away": {"wins": 0, "draws": 0, "losses": 0}},
-           "goals_scored": 0, "goals_conceded": 0, "games_played": 0}
-    games = []
-    for e in pool:
-        if not isinstance(e, dict):
-            continue
-        h, a = e.get("strHomeTeam"), e.get("strAwayTeam")
-        hs, as_ = e.get("intHomeScore"), e.get("intAwayScore")
-        if team in (h, a) and hs not in (None, "") and as_ not in (None, ""):
-            try:
-                hs, as_ = int(hs), int(as_)
-            except Exception:
-                continue
-            games.append((hs, as_) if team == h else (as_, hs))
-    games = games[-6:]
-    n = len(games)
-    sig["games_played"] = n
-    if n == 0:
-        return sig
-    gf = sum(g for g, c in games); ga = sum(c for g, c in games)
-    sig["goals_scored"], sig["goals_conceded"] = gf, ga
-    sig["attack"] = max(0.2, (gf / n) / 1.35)
-    sig["defence"] = max(0.2, (ga / n) / 1.35)
-    sig["form_score"] = sum(1 if g > c else (-1 if g < c else 0) for g, c in games) / n
-    sig["form"] = ["W" if g > c else ("L" if g < c else "D") for g, c in games]
-    return sig
-
-def _team_stats_for(lid, team):
-    tab = league_table(lid)
-    if tab:
-        s = _table_team_stats(tab, team)
-        if s["games_played"] > 0:
-            return s
-    return _pool_team_stats(league_past(lid), team)
-
-# ---------------- model ----------------
-def _poisson_pmf(k, lam):
-    return math.exp(-lam) * (lam ** k) / math.factorial(k)
-
-def _poisson_joint(mu_home, mu_away, max_goals=8):
-    return {(i, j): _poisson_pmf(i, mu_home) * _poisson_pmf(j, mu_away)
-            for i in range(max_goals + 1) for j in range(max_goals + 1)}
-
-def p_over15(probs):
-    return sum(p for (h, a), p in probs.items() if h + a >= 2)
-
-def _home_away_split(record, venue):
-    rec = record.get(venue, {})
-    w, d, l = _safe_float(rec.get("wins", 0)), _safe_float(rec.get("draws", 0)), _safe_float(rec.get("losses", 0))
-    return (w + 0.5 * d) / (w + d + l) if (w + d + l) else 0.0
-
-def compute_match_signals(home, away, league_avg=1.35):
-    mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0)) * 1.12
-    mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0)) * 0.94
-    probs = _poisson_joint(mu_home, mu_away)
-    p_home = sum(p for (h, a), p in probs.items() if h > a)
-    p_draw = sum(p for (h, a), p in probs.items() if h == a)
-    p_away = sum(p for (h, a), p in probs.items() if h < a)
-    hs_, as_ = _safe_float(home.get("form_score"), 0.0), _safe_float(away.get("form_score"), 0.0)
-    hh, aa = _home_away_split(home.get("record", {}), "home"), _home_away_split(away.get("record", {}), "away")
-    best = max([("Home", p_home), ("Draw", p_draw), ("Away", p_away)], key=lambda x: x[1])
-    raw = best[1]
-    if best[0] == "Home":
-        raw += 0.03 * hs_ - 0.03 * as_ + 0.02 * hh - 0.02 * aa
-    elif best[0] == "Away":
-        raw += 0.03 * as_ - 0.03 * hs_ + 0.02 * aa - 0.02 * hh
-    else:
-        raw += 0.01 * (hs_ - as_)
-    return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP_1X2, max(0.0, raw)), 3),
-            "probs": probs,
-            "markets": {"Home": p_home, "Draw": p_draw, "Away": p_away,
-                        "Over 1.5": p_over15(probs),
-                        "1X": p_home + p_draw, "X2": p_away + p_draw, "12": p_home + p_away}}
-
-def best_market_pick(signals):
-    markets = signals.get("markets", {})
-    if not markets:
-        return signals["outcome"], signals["confidence"], signals["confidence"]
-    capped = {}
-    for m, p in markets.items():
-        cap = CONFIDENCE_CAP_1X2 if m in ("Home", "Draw", "Away") else CONFIDENCE_CAP_SAFE
-        capped[m] = round(min(cap, max(0.0, p)), 3)
-    name, cp = max(capped.items(), key=lambda x: x[1])
-    return name, cp, markets.get(name, cp)
-
-def fact_check(pick, home_form, away_form):
-    passed = True
-    if pick == "Home" and home_form < -0.2:
-        passed = False
-    elif pick == "Away" and away_form < -0.2:
-        passed = False
-    return passed
-
-def _estimate_odds_from_prob(p):
-    return round(1.0 / max(0.05, min(0.95, p)), 2)
-
-def _analyze(home, away, lid):
-    hd = _team_stats_for(lid, home)
-    ad = _team_stats_for(lid, away)
-    sig = compute_match_signals(hd, ad)
-    best_pick, best_conf, raw_p = best_market_pick(sig)
-    low = hd["games_played"] == 0 or ad["games_played"] == 0
-    if low:
-        best_conf = round(min(best_conf, 0.5), 3)
-    passed = fact_check(best_pick, hd["form_score"], ad["form_score"])
-    return {"outcome": best_pick, "confidence": best_conf, "probs": sig["probs"],
-            "markets": sig["markets"], "market_prob": raw_p, "low": low}, passed
-
-# ---------------- TAB 1 DATA ----------------
-@st.cache_data(ttl=3600)
-def daily_board():
-    rows = []; picks = []
-    for lg in LEAGUES:
-        lid = EURO_LEAGUES[lg]
-        for fx in league_next(lid)[:4]:
-            home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-            dd = fx.get("dateEvent") or ""
-            sig, passed = _analyze(home, away, lid)
-            odds = _estimate_odds_from_prob(sig["market_prob"])
-            rows.append({"Date": dd, "League": lg, "Match": f"{home} vs {away}",
-                         "Pick": sig["outcome"], "Confidence": f"{sig['confidence']*100:.0f}%",
-                         "Odds": f"{odds:.2f}", "Fact-check": "✅" if passed else "⚠️"})
-            if passed and sig["confidence"] >= 0.55:
-                picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                              "confidence": sig["confidence"], "odds": odds,
-                              "fact_checked": True, "league": lg})
-    rows.sort(key=lambda r: (r["Date"] or "9999", -int(r["Confidence"][:-1])))
-    picks.sort(key=lambda p: -p["confidence"])
-    return rows, picks
-
-@st.cache_data(ttl=6 * 3600)
-def weekly_slip_board():
-    from datetime import timedelta as _td
-    rows = []; acc_picks = []
-    for off in range(7):
-        d = (datetime.utcnow() + _td(days=off)).strftime("%Y-%m-%d")
-        evs = [e for e in fixtures_on(d)
-               if isinstance(e, dict) and _safe_float(e.get("idLeague"), 0) in EURO_IDS]
-        day_picks = []
-        for e in evs[:12]:
-            home, away = e.get("strHomeTeam"), e.get("strAwayTeam")
-            lid = int(_safe_float(e.get("idLeague"), 0))
-            lg = e.get("strLeague") or ""
-            if not home or not away:
-                continue
-            sig, passed = _analyze(home, away, lid)
-            if sig["confidence"] < 0.55:
-                continue
-            if sig["outcome"] in ("Home", "Draw", "Away") and not passed:
-                continue
-            odds = _estimate_odds_from_prob(sig["market_prob"])
-            day_picks.append({"Date": d, "League": lg, "Match": f"{home} vs {away}",
-                              "Pick": sig["outcome"], "conf": sig["confidence"], "Odds": odds})
-        day_picks.sort(key=lambda p: -p["conf"])
-        for p in day_picks[:2]:
-            rows.append({"Date": p["Date"], "League": p["League"], "Match": p["Match"],
-                         "Pick": p["Pick"], "Confidence": f"{p['conf']*100:.0f}%",
-                         "Odds": f"{p['Odds']:.2f}"})
-            acc_picks.append(p)
-    if not rows:
-        return None
-    acc_picks.sort(key=lambda p: -p["conf"])
-    comb = 1.0
-    for p in acc_picks:
-        comb *= p["Odds"]
-    acc = {"legs": [{"fixture": p["Match"], "outcome": p["Pick"], "confidence": p["conf"],
-                     "odds": p["Odds"], "league": p["League"]} for p in acc_picks],
-           "combined_odds": round(comb, 2),
-           "avg_confidence": sum(p["conf"] for p in acc_picks) / len(acc_picks)}
-    return {"rows": rows, "acc": acc}
-
-# ---------------- TAB 5 DATA ----------------
-def build_target_odds(picks, target=2.0, lo=1.8, hi=2.2, max_legs=6):
-    top = sorted(picks, key=lambda p: -p["confidence"])[:18]
-    best = None
-    for k in range(2, max_legs + 1):
-        for combo in itertools.combinations(top, k):
-            comb = 1.0
-            ok = True
-            for p in combo:
-                comb *= _safe_float(p.get("odds", 1.0), 1.0)
-                if comb > hi:
-                    ok = False
-                    break
-            if not ok or comb < lo:
-                continue
-            avg_conf = sum(p["confidence"] for p in combo) / k
-            cand = (abs(comb - target), -avg_conf)
-            if best is None or cand < best[0]:
-                best = (cand, list(combo), comb, avg_conf)
-    if best is None:
-        return None
-    _, legs, comb, avg_conf = best
-    return {"legs": legs, "combined_odds": round(comb, 2), "avg_confidence": round(avg_conf, 3)}
-
-@st.cache_data(ttl=3600)
-def daily_2odds():
-    candidates = []
-    for lg in LEAGUES:
-        lid = EURO_LEAGUES[lg]
-        for fx in league_next(lid)[:6]:
-            home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-            sig, passed = _analyze(home, away, lid)
-            if sig["confidence"] < 0.5:
-                continue
-            if sig["outcome"] in ("Home", "Draw", "Away") and not passed:
-                continue
-            odds = _estimate_odds_from_prob(sig["market_prob"])
-            candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                               "confidence": sig["confidence"], "odds": odds, "league": lg})
-    top = sorted(candidates, key=lambda p: -p["confidence"])[:10]
-    top_rows = [{"#": i + 1, "League": p["league"], "Match": p["fixture"],
-                 "Best Market": p["outcome"], "Confidence": f"{p['confidence']*100:.0f}%",
-                 "Odds": f"{p['odds']:.2f}"} for i, p in enumerate(top)]
-    return top_rows, build_target_odds(candidates)
-
 # ---------------- TheOddsAPI ----------------
 def get_odds_api_key():
     key = os.environ.get("OWENZO_ODDS_API_KEY", "")
@@ -610,8 +690,8 @@ def get_odds_api_key():
 def fetch_market_odds(api_key, sport_key, region="eu", market="h2h"):
     if not api_key:
         return []
-    data = _api_get(ODDS_API_BASE, f"sports/{sport_key}/odds",
-                    {"apiKey": api_key, "regions": region, "markets": market, "oddsFormat": "decimal"})
+    data = _polite_get(ODDS_API_BASE, f"sports/{sport_key}/odds",
+                       {"apiKey": api_key, "regions": region, "markets": market, "oddsFormat": "decimal"})
     out = []
     for ev in _as_list(data):
         if not isinstance(ev, dict):
@@ -656,7 +736,7 @@ def build_slip(picks, bankroll=DEFAULT_BANKROLL, stake_pct=STAKE_PCT, max_legs=M
 
 # ---------------- backtest ----------------
 def fetch_historical_fixtures(league_id, season="2024-2025", limit=200):
-    data = _api_get(API_BASE, "eventsseason.php", {"id": league_id, "s": season})
+    data = _polite_get(API_BASE, "eventsseason.php", {"id": league_id, "s": season})
     out = []
     for ev in _as_list((data or {}).get("events")):
         if not isinstance(ev, dict):
@@ -668,6 +748,10 @@ def fetch_historical_fixtures(league_id, season="2024-2025", limit=200):
     return out[:limit]
 
 def run_backtest(fixtures, lid, min_confidence=0.5):
+    names = []
+    for fx in fixtures:
+        names += [fx["home"], fx["away"]]
+    _prefetch(names)
     results = []
     for fx in fixtures:
         sig, passed = _analyze(fx["home"], fx["away"], lid)
@@ -700,8 +784,8 @@ if "logged_in" not in st.session_state:
 if "settings" not in st.session_state:
     st.session_state["settings"] = load_settings()
 
-st.title("⚽ Owenzo Football AI — Live Prediction Engine")
-st.caption("Poisson model powered by **official league tables** (real goals/wins per team) with fact-check layer and real market-odds value feed. **Predictions are probabilistic model estimates — NOT guarantees.** Bet responsibly.")
+st.title("⚽ Owenzo Football AI — Upcoming Prediction Engine")
+st.caption("Real per-team form (last-10 results) fused with league tables • fact-check layer • real market-odds value feed. **Predictions are probabilistic model estimates — NOT guarantees.** Bet responsibly.")
 if st.session_state["logged_in"]:
     st.caption(f"👤 Signed in as **{st.session_state['username']}**")
     if st.button("Logout"):
@@ -733,8 +817,9 @@ tab_predict, tab_tracker, tab_euro, tab_value, tab_daily2, tab_bankroll, tab_bac
 # ==== TAB 1 ====
 with tab_predict:
     st.subheader("🔮 Upcoming Prediction Board — All European Leagues (auto)")
-    st.caption("UPCOMING fixtures from 19 European leagues, powered by official standings. Every pick = highest-confidence market (1X2 / Over 1.5 / Double Chance). Slip auto-records once per day.")
-    board_rows, board_picks = daily_board()
+    st.caption("UPCOMING fixtures from 19 European leagues with REAL team form. Every pick = highest-confidence market (1X2 / Over 1.5 / Double Chance). First load fetches fresh form (~30s); then cached 24h.")
+    with st.spinner("Fetching real team form & building predictions..."):
+        board_rows, board_picks, _ = daily_board()
     if not board_rows:
         st.info("No upcoming fixtures found right now.")
     else:
@@ -824,6 +909,7 @@ with tab_value:
             market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(value_league, "soccer_epl"), region=region) if api_key else []
             lid = EURO_LEAGUES[value_league]
             fixtures = league_next(lid)
+            _prefetch([fx.get("strHomeTeam") for fx in fixtures[:12]] + [fx.get("strAwayTeam") for fx in fixtures[:12]])
             if not market:
                 st.info("No real market odds available. Showing model-estimated odds instead.")
             rows = []; picks = []
