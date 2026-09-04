@@ -1,6 +1,6 @@
 """
 Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-FINAL v4: 7-Day Accumulator = ALL qualifying picks (unlimited legs, no odds cap)
+FINAL v5 — all features merged, KeyError fixed
 """
 import os, math, hashlib, secrets, sqlite3, itertools
 from datetime import datetime
@@ -542,25 +542,26 @@ def weekly_slip_board():
                 continue
             odds = _estimate_odds_from_prob(sig["market_prob"])
             day_picks.append({"Date": d, "League": lg, "Match": f"{home} vs {away}",
-                              "Pick": sig["outcome"], "Confidence": sig["confidence"], "Odds": odds})
-        day_picks.sort(key=lambda p: -p["confidence"])
+                              "Pick": sig["outcome"], "conf": sig["confidence"], "Odds": odds})
+        day_picks.sort(key=lambda p: -p["conf"])
         for p in day_picks[:2]:
             rows.append({"Date": p["Date"], "League": p["League"], "Match": p["Match"],
-                         "Pick": p["Pick"], "Confidence": f"{p['Confidence']*100:.0f}%",
+                         "Pick": p["Pick"], "Confidence": f"{p['conf']*100:.0f}%",
                          "Odds": f"{p['Odds']:.2f}"})
             acc_picks.append(p)
     if not rows:
         return None
-    # UNLIMITED legs, UNLIMITED combined odds — every qualifying pick joins
-    acc_picks.sort(key=lambda p: (-p["Confidence"]))
+    acc_picks.sort(key=lambda p: -p["conf"])
     legs = acc_picks
     comb = 1.0
     for p in legs:
         comb *= p["Odds"]
     acc = None
     if legs:
-        acc = {"legs": legs, "combined_odds": round(comb, 2),
-               "avg_confidence": sum(p["Confidence"] for p in legs) / len(legs)}
+        acc = {"legs": [{"fixture": p["Match"], "outcome": p["Pick"], "confidence": p["conf"],
+                         "odds": p["Odds"], "league": p["League"]} for p in legs],
+               "combined_odds": round(comb, 2),
+               "avg_confidence": sum(p["conf"] for p in legs) / len(legs)}
     return {"rows": rows, "acc": acc}
 
 # ---------------- AUTO 2-ODDS (Tab 5): 2-6 legs, multi-league ----------------
@@ -609,7 +610,7 @@ def daily_2odds():
                  "Odds": f"{p['odds']:.2f}"} for i, p in enumerate(top)]
     return top_rows, build_target_odds(candidates)
 
-# ---------------- TheOddsAPI ----------------
+# ---------------- TheOddsAPI (key NEVER displayed) ----------------
 def get_odds_api_key():
     key = os.environ.get("OWENZO_ODDS_API_KEY", "")
     if not key:
@@ -1003,6 +1004,8 @@ if st.session_state["logged_in"]:
                         if revoke_user(revoke_name):
                             st.success(f"Revoked '{revoke_name}'.")
                             st.rerun()
+                else:
+                    st.caption("No other users yet — add your first VIP member above.")
             if users:
                 st.markdown("### 🔑 Change another user's password (admin override)")
                 target_user = st.selectbox("User", [u["username"] for u in users], key="target_reset_user")
