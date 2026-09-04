@@ -1,6 +1,6 @@
 """
 Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-Fixes: admin-only API key | correct branding | real team data (ID lookup)
+FINAL: auto daily board (all leagues) | hidden API key | multi-league 2-odds | auto-record slip
 """
 import os, math, hashlib, secrets, sqlite3
 from datetime import datetime
@@ -223,7 +223,7 @@ def bankroll_stats():
             "wins": wins, "losses": losses, "pending": pending,
             "win_rate": round(wins / settled, 4) if settled else 0.0, "bets": len(bets), "start": start}
 
-# ---------------- slips DB ----------------
+# ---------------- slips DB + AUTO-RECORD ----------------
 def load_slips():
     if not os.path.exists(DB_NAME):
         return pd.DataFrame(), False, None
@@ -254,6 +254,37 @@ def load_slips():
     else:
         has_date = False
     return df, has_date, date_col
+
+def auto_record_slip(slip):
+    """Record today's auto slip once per day (schema-flexible, never crashes)."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(DB_NAME)
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({SLIPS_TABLE})")]
+        if not cols:
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {SLIPS_TABLE} (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, slip_text TEXT, legs INTEGER, combined_odds REAL, stake REAL, result TEXT DEFAULT 'pending', profit REAL DEFAULT 0.0)")
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({SLIPS_TABLE})")]
+        if "date" in cols:
+            if conn.execute(f"SELECT COUNT(*) FROM {SLIPS_TABLE} WHERE date = ?", (today,)).fetchone()[0]:
+                conn.close()
+                return False
+        leg_text = " | ".join(f"{p['fixture']} → {p['outcome']}" for p in slip["legs"])
+        now = datetime.now().isoformat()
+        vals = {"date": today, "slip_text": leg_text, "legs": len(slip["legs"]),
+                "combined_odds": slip["combined_odds"], "stake": slip["stake"],
+                "result": "pending", "profit": 0.0, "timestamp": now,
+                "created_at": now, "slip_date": today}
+        use = [c for c in cols if c in vals]
+        if not use:
+            conn.close()
+            return False
+        conn.execute(f"INSERT INTO {SLIPS_TABLE} ({','.join(use)}) VALUES ({','.join('?' * len(use))})",
+                     [vals[c] for c in use])
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 def compute_pnl_summary(df, has_date):
     empty = {"daily": 0.0, "weekly": 0.0, "monthly": 0.0, "total": 0.0, "wins": 0,
@@ -303,7 +334,6 @@ def _defensive_strength(conceded, played):
     return max(0.0, min(1.0, 1.0 - (conceded / max(1, played)) / 3.0))
 
 def compute_match_signals(home, away, league_avg=1.35):
-    # FIX: home-advantage factors so matches are never symmetric
     mu_home = max(0.05, league_avg * _safe_float(home.get("attack", 1.0), 1.0) * _safe_float(away.get("defence", 1.0), 1.0)) * 1.12
     mu_away = max(0.05, league_avg * _safe_float(away.get("attack", 1.0), 1.0) * _safe_float(home.get("defence", 1.0), 1.0)) * 0.94
     probs = _poisson_joint(mu_home, mu_away)
@@ -324,7 +354,7 @@ def compute_match_signals(home, away, league_avg=1.35):
         raw += 0.01 * (hs_ - as_)
     return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP, max(0.0, raw)), 3), "probs": probs}
 
-# ---------------- data layer (FIXED: name -> team ID -> real results) ----------------
+# ---------------- data layer ----------------
 @st.cache_data(ttl=24 * 3600)
 def _team_id(name):
     data = _api_get(API_BASE, "searchteams.php", {"t": name})
@@ -445,7 +475,30 @@ def _analyze(home, away, cache):
         reasons.append("⚠️ Limited recent data — estimate only")
     return sig, passed, reasons
 
-# ---------------- TheOddsAPI ----------------
+# ---------------- AUTO DAILY BOARD (all leagues) ----------------
+@st.cache_data(ttl=3600)
+def daily_board():
+    rows = []; picks = []
+    for lg in LEAGUES:
+        fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[lg]}) or {}).get("events"))
+        cache = {}
+        for fx in fixtures[:6]:
+            home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
+            dd = fx.get("dateEvent") or ""
+            sig, passed, reasons = _analyze(home, away, cache)
+            odds = _estimate_odds(sig["probs"], sig["outcome"])
+            rows.append({"Date": dd, "League": lg, "Match": f"{home} vs {away}",
+                         "Pick": sig["outcome"], "Confidence": f"{sig['confidence']*100:.0f}%",
+                         "Odds": f"{odds:.2f}", "Fact-check": "✅" if passed else "⚠️"})
+            if passed and sig["confidence"] >= 0.55:
+                picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                              "confidence": sig["confidence"], "odds": odds,
+                              "fact_checked": True, "league": lg})
+    rows.sort(key=lambda r: (r["Date"] or "9999", -int(r["Confidence"][:-1])))
+    picks.sort(key=lambda p: -p["confidence"])
+    return rows, picks
+
+# ---------------- TheOddsAPI (key NEVER displayed) ----------------
 def get_odds_api_key():
     key = os.environ.get("OWENZO_ODDS_API_KEY", "")
     if not key:
@@ -453,8 +506,6 @@ def get_odds_api_key():
             key = st.secrets.get("OWENZO_ODDS_API_KEY", "")
         except Exception:
             key = ""
-    if not key:
-        key = st.session_state.get("odds_api_key", "")
     return (key or "").strip()
 
 def fetch_market_odds(api_key, sport_key, region="eu", market="h2h"):
@@ -596,40 +647,29 @@ def _vip_gate(key):
 tab_predict, tab_tracker, tab_euro, tab_value, tab_daily2, tab_bankroll, tab_backtest = st.tabs(
     ["Predict & Slips", "Tracker & ROI", "Euro Hub", "🔒 Value Bets", "🔒 Daily 2-Odds", "🔒 Bankroll", "🔒 Backtest"])
 
-# ---- TAB 1 (PUBLIC) ----
+# ---- TAB 1 (PUBLIC, AUTO) ----
 with tab_predict:
-    st.subheader("🔮 Predict & Slips")
-    league = st.selectbox("League", LEAGUES, key="predict_league")
-    if st.button("Generate Predictions", type="primary"):
-        with st.spinner("Fetching fixtures & building model signals..."):
-            fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[league]}) or {}).get("events"))
-        if not fixtures:
-            st.info("No upcoming fixtures found for this league right now.")
+    st.subheader("🔮 Daily Prediction Board — All Leagues (auto)")
+    st.caption("Auto-generated every hour across all tracked leagues. Slip auto-records to Tracker once per day.")
+    board_rows, board_picks = daily_board()
+    if not board_rows:
+        st.info("No upcoming fixtures found right now.")
+    else:
+        st.markdown(md_table(pd.DataFrame(board_rows)))
+        _s = st.session_state["settings"]
+        slip = build_slip(board_picks, bankroll=float(_s["bankroll"]), stake_pct=float(_s["stake_pct"]),
+                          max_legs=int(_s["max_legs"]), max_odds=float(_s["max_odds"]))
+        if slip and slip["legs"]:
+            st.markdown("### 📋 Today's Auto Slip")
+            st.markdown(md_table(pd.DataFrame([
+                {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
+                 "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
+                for i, p in enumerate(slip["legs"])])))
+            st.markdown(f"**Combined odds:** {slip['combined_odds']} | **Stake:** {slip['stake']} | **Potential return:** {slip['potential_return']} | **Avg confidence:** {slip['avg_confidence']*100:.0f}%")
+            if auto_record_slip(slip):
+                st.success("📥 Slip auto-recorded to Tracker & ROI.")
         else:
-            rows = []; picks = []; cache = {}
-            for fx in fixtures[:12]:
-                home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                sig, passed, reasons = _analyze(home, away, cache)
-                odds = _estimate_odds(sig["probs"], sig["outcome"])
-                rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
-                             "Confidence": f"{sig['confidence']*100:.0f}%", "Odds": f"{odds:.2f}",
-                             "Fact-check": "✅" if passed else "⚠️"})
-                if passed and sig["confidence"] >= 0.55:
-                    picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                                  "confidence": sig["confidence"], "odds": odds, "fact_checked": True})
-            st.markdown(md_table(pd.DataFrame(rows)))
-            _s = st.session_state["settings"]
-            slip = build_slip(picks, bankroll=float(_s["bankroll"]), stake_pct=float(_s["stake_pct"]),
-                              max_legs=int(_s["max_legs"]), max_odds=float(_s["max_odds"]))
-            if slip and slip["legs"]:
-                st.markdown("### 📋 Today's Slip")
-                st.markdown(md_table(pd.DataFrame([
-                    {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
-                     "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
-                    for i, p in enumerate(slip["legs"])])))
-                st.markdown(f"**Combined odds:** {slip['combined_odds']} | **Stake:** {slip['stake']} | **Potential return:** {slip['potential_return']} | **Avg confidence:** {slip['avg_confidence']*100:.0f}%")
-            else:
-                st.info("No picks passed the fact-check threshold today.")
+            st.info("No picks passed the fact-check threshold today.")
     st.markdown("---\n*Confidence is a model estimate capped at 78% — not a guarantee.*")
 
 # ---- TAB 2 (PUBLIC) ----
@@ -663,14 +703,8 @@ with tab_euro:
 with tab_value:
     if _vip_gate("value"):
         st.subheader("👑 Owenzõ Soccer AI Vip-01 — 💎 Value Bets (Real Market Odds)")
-        with st.expander("⚙️ Odds API Settings"):
-            if is_admin(st.session_state.get("username")):
-                odds_key_input = st.text_input("TheOddsAPI key (the-odds-api.com)", value=get_odds_api_key(), type="password")
-                if odds_key_input:
-                    st.session_state["odds_api_key"] = odds_key_input
-                st.caption("🔐 Key visible to admin only. For permanent private storage, add OWENZO_ODDS_API_KEY to Streamlit Secrets.")
-            else:
-                st.caption("✅ Live market odds feed: **active** (managed by owner).")
+        with st.expander("⚙️ Odds Settings"):
+            st.caption("🔐 Live market odds feed: **active** — API key is stored privately by the owner (Streamlit Secrets) and is never displayed.")
             region = st.selectbox("Odds region", ["eu", "uk", "us"], index=0)
         with st.expander("💰 Bankroll & Betting Settings"):
             _s = st.session_state["settings"]
@@ -688,7 +722,7 @@ with tab_value:
         value_league = st.selectbox("League (odds)", LEAGUES, key="value_league")
         api_key = get_odds_api_key()
         if not api_key:
-            st.warning("No TheOddsAPI key set. Falling back to estimated odds.")
+            st.warning("Odds feed not configured on server. Falling back to estimated odds.")
         if st.button("Find Value Bets", type="primary"):
             market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(value_league, "soccer_epl"), region=region) if api_key else []
             fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[value_league]}) or {}).get("events"))
@@ -733,43 +767,45 @@ with tab_value:
                     st.info("No value bets found above the edge threshold today.")
         st.markdown("---\n*Value betting improves expected value over large samples — it does not guarantee wins.*")
 
-# ---- TAB 5 (VIP) ----
+# ---- TAB 5 (VIP, MULTI-LEAGUE) ----
 with tab_daily2:
     if _vip_gate("daily2"):
-        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds")
-        st.caption("2 strongest picks whose combined odds land closest to 2.0 (range 1.8–2.2). Probabilistic estimate — not guaranteed.")
-        d2_league = st.selectbox("Select league (2-odds)", LEAGUES, key="d2_league")
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds (All Leagues)")
+        st.caption("Scans ALL leagues and combines the 2 strongest picks (any leagues) closest to 2.0 combined odds (1.8–2.2). Probabilistic estimate — not guaranteed.")
         if st.button("Build Daily 2-Odds", type="primary"):
-            with st.spinner("Scanning fixtures..."):
-                fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[d2_league]}) or {}).get("events"))
+            with st.spinner("Scanning ALL leagues for the best combination..."):
                 api_key = get_odds_api_key()
-                market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(d2_league, "soccer_epl")) if api_key else []
-            if not fixtures:
-                st.info("No upcoming fixtures found for this league right now.")
+                candidates = []
+                for lg in LEAGUES:
+                    fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[lg]}) or {}).get("events"))
+                    market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(lg, "soccer_epl")) if api_key else []
+                    cache = {}
+                    for fx in fixtures[:8]:
+                        home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
+                        sig, passed, _ = _analyze(home, away, cache)
+                        if not passed or sig["confidence"] < 0.5:
+                            continue
+                        odds = next((m["home_odds"] for m in market
+                                     if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
+                        odds = odds or _estimate_odds(sig["probs"], sig["outcome"])
+                        candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                                           "confidence": sig["confidence"], "odds": odds, "league": lg})
+            if not candidates:
+                st.info("No qualifying picks today. Try again later.")
             else:
-                candidates = []; cache = {}
-                for fx in fixtures[:12]:
-                    home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                    sig, passed, _ = _analyze(home, away, cache)
-                    if not passed or sig["confidence"] < 0.5:
-                        continue
-                    odds = next((m["home_odds"] for m in market
-                                 if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
-                    odds = odds or _estimate_odds(sig["probs"], sig["outcome"])
-                    candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                                       "confidence": sig["confidence"], "odds": odds})
                 d2 = build_daily_odds(candidates)
                 if d2:
                     _s = st.session_state["settings"]
                     stake = round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2)
-                    st.markdown("### 🎯 Today's 2-Odds Accumulator")
+                    st.markdown("### 🎯 Today's 2-Odds Accumulator (multi-league)")
                     st.markdown(md_table(pd.DataFrame([
-                        {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
-                         "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
+                        {"Leg": i + 1, "League": p.get("league", ""), "Fixture": p["fixture"],
+                         "Pick": p["outcome"], "Odds": f"{p['odds']:.2f}",
+                         "Confidence": f"{p['confidence']*100:.0f}%"}
                         for i, p in enumerate(d2["legs"])])))
                     st.markdown(f"**Combined odds:** {d2['combined_odds']:.2f} | **Avg confidence:** {d2['avg_confidence']*100:.0f}% | **Stake:** {stake} | **Potential return:** {stake * d2['combined_odds']:.2f}")
                 else:
-                    st.info("No pair landed in the 1.8–2.2 range today. Try another league.")
+                    st.info("No pair landed in the 1.8–2.2 range today.")
         st.markdown("---\n*A ~2.0 accumulator can lose. Bet responsibly.*")
 
 # ---- TAB 6 (VIP) ----
