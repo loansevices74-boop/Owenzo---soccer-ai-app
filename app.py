@@ -1,7 +1,7 @@
 """
 Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-FINAL v6 — league-pool data layer (no per-team calls = no 429s),
-7-day slip covers ALL European leagues, unlimited-leg accumulator
+FINAL v7 — Tab1: UPCOMING board + FULL daily slip (best market per match) +
+7-day unlimited accumulator. League-pool data layer (no 429s).
 """
 import os, math, hashlib, secrets, sqlite3, itertools, time
 from datetime import datetime
@@ -354,7 +354,7 @@ def _pool_team_stats(pool, team):
                 hs, as_ = int(hs), int(as_)
             except Exception:
                 continue
-            games.append((hs, as_) if team == h else (as_, hs), )
+            games.append((hs, as_) if team == h else (as_, hs))
             sig["record"]["home" if team == h else "away"][
                 "wins" if (hs > as_) else ("losses" if (hs < as_) else "draws")] += 1
     games = games[-6:]
@@ -486,7 +486,7 @@ def _analyze(home, away, lid):
     return {"outcome": best_pick, "confidence": best_conf, "probs": sig["probs"],
             "markets": sig["markets"], "market_prob": raw_p}, passed, reasons
 
-# ---------------- AUTO DAILY BOARD (Tab 1, all 19 Euro leagues) ----------------
+# ---------------- TAB 1 DATA: upcoming board + FULL daily slip ----------------
 @st.cache_data(ttl=3600)
 def daily_board():
     rows = []; picks = []
@@ -508,7 +508,7 @@ def daily_board():
     picks.sort(key=lambda p: -p["confidence"])
     return rows, picks
 
-# ---------------- 7-DAY AUTO SLIP (ALL European leagues, unlimited legs) ----------------
+# ---------------- TAB 1 DATA: 7-day (ALL Euro leagues, unlimited) ----------------
 @st.cache_data(ttl=6 * 3600)
 def weekly_slip_board():
     from datetime import timedelta as _td
@@ -550,7 +550,7 @@ def weekly_slip_board():
            "avg_confidence": sum(p["conf"] for p in acc_picks) / len(acc_picks)}
     return {"rows": rows, "acc": acc}
 
-# ---------------- AUTO 2-ODDS (Tab 5): 2-6 legs, all leagues ----------------
+# ---------------- TAB 5 DATA: 2-6 legs ----------------
 def build_target_odds(picks, target=2.0, lo=1.8, hi=2.2, max_legs=6):
     top = sorted(picks, key=lambda p: -p["confidence"])[:18]
     best = None
@@ -632,7 +632,7 @@ def fetch_market_odds(api_key, sport_key, region="eu", market="h2h"):
 def market_implied_prob(odds):
     return 1.0 / odds if odds and odds > 1.0 else 0.0
 
-# ---------------- slip builder ----------------
+# ---------------- slip builder (Tabs 4) ----------------
 def build_slip(picks, bankroll=DEFAULT_BANKROLL, stake_pct=STAKE_PCT, max_legs=MAX_LEGS, max_odds=MAX_ODDS):
     legs = [p for p in picks if p.get("fact_checked") is not False][:max_legs]
     if not legs:
@@ -729,26 +729,29 @@ def _vip_gate(key):
 tab_predict, tab_tracker, tab_euro, tab_value, tab_daily2, tab_bankroll, tab_backtest = st.tabs(
     ["Predict & Slips", "Tracker & ROI", "Euro Hub", "🔒 Value Bets", "🔒 Daily 2-Odds", "🔒 Bankroll", "🔒 Backtest"])
 
-# ---- TAB 1 (PUBLIC, AUTO) ----
+# ==== TAB 1 (PUBLIC) — UPCOMING board + FULL daily slip + 7-day unlimited ====
 with tab_predict:
-    st.subheader("🔮 Daily Prediction Board — All European Leagues (auto)")
-    st.caption("Auto-generated across 19 European leagues. Slip auto-records to Tracker once per day.")
+    st.subheader("🔮 Upcoming Prediction Board — All European Leagues (auto)")
+    st.caption("UPCOMING fixtures auto-generated across 19 European leagues. Every pick = the highest-confidence market (1X2 / Over 1.5 / Double Chance). Slip auto-records to Tracker once per day.")
     board_rows, board_picks = daily_board()
     if not board_rows:
         st.info("No upcoming fixtures found right now.")
     else:
         st.markdown(md_table(pd.DataFrame(board_rows)))
         _s = st.session_state["settings"]
-        slip = build_slip(board_picks, bankroll=float(_s["bankroll"]), stake_pct=float(_s["stake_pct"]),
-                          max_legs=int(_s["max_legs"]), max_odds=float(_s["max_odds"]))
-        if slip and slip["legs"]:
-            st.markdown("### 📋 Today's Auto Slip")
+        stake = round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2)
+        if board_picks:
+            legs = board_picks
+            comb = 1.0
+            for p in legs:
+                comb *= p["odds"]
+            st.markdown(f"### 📋 Today's FULL Auto Slip ({len(legs)} legs — ALL qualifying picks)")
             st.markdown(md_table(pd.DataFrame([
                 {"Leg": i + 1, "Fixture": p["fixture"], "Pick": p["outcome"],
                  "Odds": f"{p['odds']:.2f}", "Confidence": f"{p['confidence']*100:.0f}%"}
-                for i, p in enumerate(slip["legs"])])))
-            st.markdown(f"**Combined odds:** {slip['combined_odds']} | **Stake:** {slip['stake']} | **Potential return:** {slip['potential_return']} | **Avg confidence:** {slip['avg_confidence']*100:.0f}%")
-            if auto_record_slip(slip):
+                for i, p in enumerate(legs)])))
+            st.markdown(f"**Combined odds:** {round(comb, 2)} | **Stake:** {stake} | **Potential return:** {round(stake * comb, 2)} | **Avg confidence:** {sum(p['confidence'] for p in legs)/len(legs)*100:.0f}%")
+            if auto_record_slip({"legs": legs, "combined_odds": round(comb, 2), "stake": stake}):
                 st.success("📥 Slip auto-recorded to Tracker & ROI.")
         else:
             st.info("No picks passed the fact-check threshold today.")
@@ -861,7 +864,7 @@ with tab_value:
                     st.info("No value bets found above the edge threshold today.")
         st.markdown("---\n*Value betting improves expected value over large samples — it does not guarantee wins.*")
 
-# ---- TAB 5 (VIP, AUTO, 2-6 LEGS, MULTI-LEAGUE, MULTI-MARKET) ----
+# ---- TAB 5 (VIP) ----
 with tab_daily2:
     if _vip_gate("daily2"):
         st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds (AUTO · All Leagues · All Markets)")
