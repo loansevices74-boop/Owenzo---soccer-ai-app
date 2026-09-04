@@ -1,6 +1,6 @@
 """
 Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-FINAL v2: multi-market 2-odds (1X2 + O1.5 + DC) across ALL leagues
+FINAL: auto daily board (all leagues) | hidden API key | multi-league 2-odds | auto-record slip
 """
 import os, math, hashlib, secrets, sqlite3
 from datetime import datetime
@@ -17,8 +17,7 @@ MAX_LEGS = 4
 MAX_ODDS = 8.0
 STAKE_PCT = 0.005
 DEFAULT_BANKROLL = 1000.0
-CONFIDENCE_CAP_1X2 = 0.78
-CONFIDENCE_CAP_SAFE = 0.90  # Over 1.5 & Double Chance are naturally higher
+CONFIDENCE_CAP = 0.78
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASS = "owenzo2026"
 ODDS_SPORT_KEYS = {"English Premier League": "soccer_epl", "La Liga": "soccer_spain_la_liga",
@@ -224,7 +223,7 @@ def bankroll_stats():
             "wins": wins, "losses": losses, "pending": pending,
             "win_rate": round(wins / settled, 4) if settled else 0.0, "bets": len(bets), "start": start}
 
-# ---------------- slips DB ----------------
+# ---------------- slips DB + AUTO-RECORD ----------------
 def load_slips():
     if not os.path.exists(DB_NAME):
         return pd.DataFrame(), False, None
@@ -257,6 +256,7 @@ def load_slips():
     return df, has_date, date_col
 
 def auto_record_slip(slip):
+    """Record today's auto slip once per day (schema-flexible, never crashes)."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         conn = sqlite3.connect(DB_NAME)
@@ -340,10 +340,6 @@ def compute_match_signals(home, away, league_avg=1.35):
     p_home = sum(p for (h, a), p in probs.items() if h > a)
     p_draw = sum(p for (h, a), p in probs.items() if h == a)
     p_away = sum(p for (h, a), p in probs.items() if h < a)
-    p_over15 = sum(p for (h, a), p in probs.items() if h + a >= 2)
-    p_1x = p_home + p_draw
-    p_x2 = p_away + p_draw
-    p_12 = p_home + p_away
     hs_, as_ = _form_streak(home.get("form", [])), _form_streak(away.get("form", []))
     hh, aa = _home_away_split(home.get("record", {}), "home"), _home_away_split(away.get("record", {}), "away")
     hd = _defensive_strength(_safe_float(home.get("goals_conceded", 0)), _safe_float(home.get("games_played", 1), 1))
@@ -356,29 +352,7 @@ def compute_match_signals(home, away, league_avg=1.35):
         raw += 0.02 * as_ - 0.02 * hs_ + 0.02 * aa - 0.02 * hh + 0.02 * ad - 0.02 * hd
     else:
         raw += 0.01 * (hs_ - as_)
-    return {
-        "outcome": best[0], "confidence": round(min(CONFIDENCE_CAP_1X2, max(0.0, raw)), 3),
-        "probs": probs,
-        "markets": {
-            "Home": p_home, "Draw": p_draw, "Away": p_away,
-            "Over 1.5": p_over15,
-            "1X (Home or Draw)": p_1x, "X2 (Draw or Away)": p_x2, "12 (Home or Away)": p_12,
-        }
-    }
-
-# ---------------- MULTI-MARKET BEST PICK ----------------
-def best_market_pick(signals):
-    """Return the single highest-probability market from {Home, Draw, Away, Over 1.5, 1X, X2, 12}."""
-    markets = signals.get("markets", {})
-    if not markets:
-        return signals["outcome"], signals["confidence"]
-    # Apply caps: 1X2 markets capped at 0.78; Over 1.5 and DC capped at 0.90
-    capped = {}
-    for m, p in markets.items():
-        cap = CONFIDENCE_CAP_1X2 if m in ("Home", "Draw", "Away") else CONFIDENCE_CAP_SAFE
-        capped[m] = round(min(cap, max(0.0, p)), 3)
-    best_m = max(capped.items(), key=lambda x: x[1])
-    return best_m[0], best_m[1]
+    return {"outcome": best[0], "confidence": round(min(CONFIDENCE_CAP, max(0.0, raw)), 3), "probs": probs}
 
 # ---------------- data layer ----------------
 @st.cache_data(ttl=24 * 3600)
@@ -459,30 +433,29 @@ def _h2h(home, away, pool=None):
 
 def fact_check(pick, h2h, home_form, away_form):
     reasons = []; passed = True
-    # For 1X2 picks, apply H2H + form checks
-    if pick in ("Home", "Draw", "Away"):
-        if h2h:
-            hw, aw, dr = h2h.get("home_wins", 0), h2h.get("away_wins", 0), h2h.get("draws", 0)
-            if pick == "Home" and aw > hw:
-                reasons.append(f"H2H favours away ({aw}-{hw})"); passed = False
-            elif pick == "Away" and hw > aw:
-                reasons.append(f"H2H favours home ({hw}-{aw})"); passed = False
-            else:
-                reasons.append(f"H2H balanced ({hw}-{dr}-{aw})")
-        if pick == "Home" and home_form < 0.0:
-            reasons.append("Home team in poor recent form"); passed = False
-        elif pick == "Away" and away_form < 0.0:
-            reasons.append("Away team in poor recent form"); passed = False
+    if h2h:
+        hw, aw, dr = h2h.get("home_wins", 0), h2h.get("away_wins", 0), h2h.get("draws", 0)
+        if pick == "Home" and aw > hw:
+            reasons.append(f"H2H favours away ({aw}-{hw})"); passed = False
+        elif pick == "Away" and hw > aw:
+            reasons.append(f"H2H favours home ({hw}-{aw})"); passed = False
         else:
-            reasons.append("Recent form supports the pick")
-    # For Over 1.5 and Double Chance — trust high probability directly
-    elif pick == "Over 1.5":
-        reasons.append("Both teams high-scoring trend supports O1.5")
-    else:  # DC markets
-        reasons.append("Double chance covers safer outcomes")
+            reasons.append(f"H2H balanced ({hw}-{dr}-{aw})")
+    if pick == "Home" and home_form < 0.0:
+        reasons.append("Home team in poor recent form"); passed = False
+    elif pick == "Away" and away_form < 0.0:
+        reasons.append("Away team in poor recent form"); passed = False
+    else:
+        reasons.append("Recent form supports the pick")
     return passed, reasons
 
-def _estimate_odds_from_prob(p):
+def _estimate_odds(probs, outcome):
+    if outcome == "Home":
+        p = sum(x for (h, a), x in probs.items() if h > a)
+    elif outcome == "Away":
+        p = sum(x for (h, a), x in probs.items() if h < a)
+    else:
+        p = sum(x for (h, a), x in probs.items() if h == a)
     return round(1.0 / max(0.05, min(0.95, p)), 2)
 
 def _analyze(home, away, cache):
@@ -494,22 +467,15 @@ def _analyze(home, away, cache):
     ad = _build_team_signal(away, cache[away])
     h2h = _h2h(home, away, cache[home] + cache[away])
     sig = compute_match_signals(hd, ad)
-    # Best market pick across ALL markets
-    best_pick, best_conf = best_market_pick(sig)
     low = hd["games_played"] == 0 or ad["games_played"] == 0
     if low:
-        best_conf = round(min(best_conf, 0.5), 3)
-    passed, reasons = fact_check(best_pick, h2h, _form_streak(hd.get("form", [])), _form_streak(ad.get("form", [])))
+        sig["confidence"] = round(min(sig["confidence"], 0.5), 3)
+    passed, reasons = fact_check(sig["outcome"], h2h, _form_streak(hd.get("form", [])), _form_streak(ad.get("form", [])))
     if low:
         reasons.append("⚠️ Limited recent data — estimate only")
-    # Market-specific probability for odds estimation
-    market_prob = sig["markets"].get(best_pick, best_conf)
-    return {
-        "outcome": best_pick, "confidence": best_conf, "probs": sig["probs"],
-        "markets": sig["markets"], "market_prob": market_prob,
-    }, passed, reasons
+    return sig, passed, reasons
 
-# ---------------- AUTO DAILY BOARD ----------------
+# ---------------- AUTO DAILY BOARD (all leagues) ----------------
 @st.cache_data(ttl=3600)
 def daily_board():
     rows = []; picks = []
@@ -520,7 +486,7 @@ def daily_board():
             home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
             dd = fx.get("dateEvent") or ""
             sig, passed, reasons = _analyze(home, away, cache)
-            odds = _estimate_odds_from_prob(sig["market_prob"])
+            odds = _estimate_odds(sig["probs"], sig["outcome"])
             rows.append({"Date": dd, "League": lg, "Match": f"{home} vs {away}",
                          "Pick": sig["outcome"], "Confidence": f"{sig['confidence']*100:.0f}%",
                          "Odds": f"{odds:.2f}", "Fact-check": "✅" if passed else "⚠️"})
@@ -532,7 +498,7 @@ def daily_board():
     picks.sort(key=lambda p: -p["confidence"])
     return rows, picks
 
-# ---------------- TheOddsAPI ----------------
+# ---------------- TheOddsAPI (key NEVER displayed) ----------------
 def get_odds_api_key():
     key = os.environ.get("OWENZO_ODDS_API_KEY", "")
     if not key:
@@ -624,7 +590,7 @@ def run_backtest(fixtures, min_confidence=0.5):
         sig, passed, _ = _analyze(fx["home"], fx["away"], cache)
         if not passed or sig["confidence"] < min_confidence:
             continue
-        odds = _estimate_odds_from_prob(sig["market_prob"])
+        odds = _estimate_odds(sig["probs"], sig["outcome"])
         actual = "Home" if fx["hs"] > fx["as"] else ("Away" if fx["as"] > fx["hs"] else "Draw")
         results.append({"Fixture": f"{fx['home']} vs {fx['away']}", "Pick": sig["outcome"],
                         "Actual": actual, "Odds": round(odds, 2),
@@ -704,7 +670,7 @@ with tab_predict:
                 st.success("📥 Slip auto-recorded to Tracker & ROI.")
         else:
             st.info("No picks passed the fact-check threshold today.")
-    st.markdown("---\n*Confidence is a model estimate — not a guarantee.*")
+    st.markdown("---\n*Confidence is a model estimate capped at 78% — not a guarantee.*")
 
 # ---- TAB 2 (PUBLIC) ----
 with tab_tracker:
@@ -738,7 +704,7 @@ with tab_value:
     if _vip_gate("value"):
         st.subheader("👑 Owenzõ Soccer AI Vip-01 — 💎 Value Bets (Real Market Odds)")
         with st.expander("⚙️ Odds Settings"):
-            st.caption("🔐 Live market odds feed: **active** — API key stored privately by the owner (Streamlit Secrets).")
+            st.caption("🔐 Live market odds feed: **active** — API key is stored privately by the owner (Streamlit Secrets) and is never displayed.")
             region = st.selectbox("Odds region", ["eu", "uk", "us"], index=0)
         with st.expander("💰 Bankroll & Betting Settings"):
             _s = st.session_state["settings"]
@@ -780,7 +746,7 @@ with tab_value:
                         picks.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
                                       "confidence": sig["confidence"], "odds": market_odds, "fact_checked": True})
                 else:
-                    est = _estimate_odds_from_prob(sig["market_prob"])
+                    est = _estimate_odds(sig["probs"], sig["outcome"])
                     rows.append({"Fixture": f"{home} vs {away}", "Pick": sig["outcome"],
                                  "Model prob": f"{sig['confidence']*100:.0f}%", "Market odds": f"{est:.2f} (est)",
                                  "Market implied": f"{market_implied_prob(est)*100:.0f}%", "Edge": "—", "Value": "—"})
@@ -801,69 +767,46 @@ with tab_value:
                     st.info("No value bets found above the edge threshold today.")
         st.markdown("---\n*Value betting improves expected value over large samples — it does not guarantee wins.*")
 
-# ---- TAB 5 (VIP, MULTI-MARKET + MULTI-LEAGUE) ----
+# ---- TAB 5 (VIP, MULTI-LEAGUE) ----
 with tab_daily2:
     if _vip_gate("daily2"):
-        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds (Multi-Market · All Leagues)")
-        st.markdown("""
-        **How this works:**
-        - Scans **ALL 5 leagues** for upcoming fixtures
-        - For every match, evaluates **7 markets**: Home / Draw / Away / Over 1.5 / 1X / X2 / 12
-        - Picks the **single highest-confidence market** per fixture
-        - Combines the **2 best picks** (from any leagues) closest to 2.0 combined odds (1.8–2.2)
-        """)
+        st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🎯 Daily 2-Odds (All Leagues)")
+        st.caption("Scans ALL leagues and combines the 2 strongest picks (any leagues) closest to 2.0 combined odds (1.8–2.2). Probabilistic estimate — not guaranteed.")
         if st.button("Build Daily 2-Odds", type="primary"):
-            with st.spinner("Scanning ALL leagues × ALL markets for the best combination..."):
+            with st.spinner("Scanning ALL leagues for the best combination..."):
                 api_key = get_odds_api_key()
                 candidates = []
                 for lg in LEAGUES:
                     fixtures = _as_list((_api_get(API_BASE, "eventsnextleague.php", {"id": LEAGUE_IDS[lg]}) or {}).get("events"))
                     market = fetch_market_odds(api_key, ODDS_SPORT_KEYS.get(lg, "soccer_epl")) if api_key else []
                     cache = {}
-                    for fx in fixtures[:10]:
+                    for fx in fixtures[:8]:
                         home, away = fx.get("strHomeTeam", "?"), fx.get("strAwayTeam", "?")
-                        sig, passed, reasons = _analyze(home, away, cache)
+                        sig, passed, _ = _analyze(home, away, cache)
                         if not passed or sig["confidence"] < 0.5:
                             continue
-                        # Try real market odds for 1X2 (fallback to model estimate)
-                        odds = None
-                        if sig["outcome"] in ("Home", "Draw", "Away"):
-                            odds = next((m["home_odds"] for m in market
-                                         if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
-                        odds = odds or _estimate_odds_from_prob(sig["market_prob"])
-                        candidates.append({
-                            "fixture": f"{home} vs {away}", "outcome": sig["outcome"],
-                            "confidence": sig["confidence"], "odds": odds, "league": lg,
-                        })
-            st.info(f"📊 Scanned **{len(candidates)} qualifying picks** across all 5 leagues.")
+                        odds = next((m["home_odds"] for m in market
+                                     if m["home"].lower() == home.lower() and m["away"].lower() == away.lower()), None)
+                        odds = odds or _estimate_odds(sig["probs"], sig["outcome"])
+                        candidates.append({"fixture": f"{home} vs {away}", "outcome": sig["outcome"],
+                                           "confidence": sig["confidence"], "odds": odds, "league": lg})
             if not candidates:
-                st.warning("No qualifying picks today. Try again later.")
+                st.info("No qualifying picks today. Try again later.")
             else:
-                # Show top 10 candidates (best single picks) for transparency
-                top10 = sorted(candidates, key=lambda p: -p["confidence"])[:10]
-                st.markdown("### 🏆 Top 10 Single Picks (all markets · all leagues)")
-                st.markdown(md_table(pd.DataFrame([
-                    {"#": i + 1, "League": p["league"], "Match": p["fixture"],
-                     "Best Market": p["outcome"], "Confidence": f"{p['confidence']*100:.0f}%",
-                     "Odds": f"{p['odds']:.2f}"}
-                    for i, p in enumerate(top10)
-                ])))
                 d2 = build_daily_odds(candidates)
                 if d2:
                     _s = st.session_state["settings"]
                     stake = round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2)
-                    st.markdown("### 🎯 Today's 2-Odds Accumulator (best combination)")
+                    st.markdown("### 🎯 Today's 2-Odds Accumulator (multi-league)")
                     st.markdown(md_table(pd.DataFrame([
-                        {"Leg": i + 1, "League": p.get("league", ""), "Match": p["fixture"],
+                        {"Leg": i + 1, "League": p.get("league", ""), "Fixture": p["fixture"],
                          "Pick": p["outcome"], "Odds": f"{p['odds']:.2f}",
                          "Confidence": f"{p['confidence']*100:.0f}%"}
                         for i, p in enumerate(d2["legs"])])))
-                    st.success(f"**Combined odds: {d2['combined_odds']:.2f}** | Avg confidence: {d2['avg_confidence']*100:.0f}% | Stake: {stake} | **Potential return: {stake * d2['combined_odds']:.2f}**")
-                    if auto_record_slip({"legs": d2["legs"], "combined_odds": d2["combined_odds"], "stake": stake}):
-                        st.info("📥 2-odds slip auto-recorded to Tracker & ROI.")
+                    st.markdown(f"**Combined odds:** {d2['combined_odds']:.2f} | **Avg confidence:** {d2['avg_confidence']*100:.0f}% | **Stake:** {stake} | **Potential return:** {stake * d2['combined_odds']:.2f}")
                 else:
                     st.info("No pair landed in the 1.8–2.2 range today.")
-        st.markdown("---\n*The 2-odds accumulator is a probabilistic model estimate, not a guaranteed win. Even a ~2.0 accumulator can lose. Bet responsibly.*")
+        st.markdown("---\n*A ~2.0 accumulator can lose. Bet responsibly.*")
 
 # ---- TAB 6 (VIP) ----
 with tab_bankroll:
@@ -891,7 +834,7 @@ with tab_bankroll:
         st.markdown("### ➕ Record a bet")
         with st.form("record_bet_form"):
             b_fixture = st.text_input("Fixture (e.g. Arsenal vs Chelsea)")
-            b_pick = st.selectbox("Pick", ["Home", "Draw", "Away", "Over 1.5", "1X", "X2", "12"])
+            b_pick = st.selectbox("Pick", ["Home", "Draw", "Away"])
             b_odds = st.number_input("Odds", min_value=1.01, value=2.0, step=0.1)
             _s = st.session_state["settings"]
             b_stake = st.number_input("Stake", min_value=0.0, value=round(float(_s["bankroll"]) * float(_s["stake_pct"]), 2), step=1.0)
@@ -909,7 +852,7 @@ with tab_bankroll:
 with tab_backtest:
     if _vip_gate("backtest"):
         st.subheader("👑 Owenzõ Soccer AI Vip-01 — 🧪 Backtest Mode")
-        st.caption("Simulate the strategy on historical fixtures. Needs 500–1,000+ bets to be statistically meaningful.")
+        st.caption("Simulate the strategy on historical fixtures. Needs 500–1,000+ bets to be statistically meaningful. Past performance ≠ future results.")
         bt_league = st.selectbox("League (backtest)", LEAGUES, key="bt_league")
         bt_season = st.text_input("Season (e.g. 2024-2025)", value="2024-2025")
         bt_limit = st.slider("Max fixtures to backtest", 20, 300, 100, 10)
@@ -917,7 +860,7 @@ with tab_backtest:
             with st.spinner("Fetching historical fixtures & simulating..."):
                 fixtures = fetch_historical_fixtures(LEAGUE_IDS[bt_league], bt_season, bt_limit)
             if not fixtures:
-                st.info("No historical fixtures found for this league/season.")
+                st.info("No historical fixtures found for this league/season. Try another season.")
             else:
                 results = run_backtest(fixtures)
                 if not results:
@@ -934,6 +877,7 @@ with tab_backtest:
 # ---- Account & Admin ----
 if st.session_state["logged_in"]:
     with st.expander("🔐 My Account"):
+        st.markdown("Change your own password (requires current password).")
         my_cur = st.text_input("Current password", type="password", key="my_cur_pass")
         my_new = st.text_input("New password", type="password", key="my_new_pass")
         my_new2 = st.text_input("Confirm new password", type="password", key="my_new_pass2")
@@ -948,6 +892,7 @@ if st.session_state["logged_in"]:
 
     if is_admin(st.session_state.get("username")):
         with st.expander("🔐 Private Admin Settings (owner only)"):
+            st.markdown("Generate access passwords for VIP users.")
             new_username = st.text_input("New username", key="admin_new_user")
             gen_pass = st.text_input("Generated password", value=st.session_state.get("gen_pass", ""), key="admin_gen_pass")
             cg1, cg2 = st.columns(2)
@@ -970,6 +915,8 @@ if st.session_state["logged_in"]:
                         if revoke_user(revoke_name):
                             st.success(f"Revoked '{revoke_name}'.")
                             st.rerun()
+                else:
+                    st.caption("No other users yet — add your first VIP member above.")
             if users:
                 st.markdown("### 🔑 Change another user's password (admin override)")
                 target_user = st.selectbox("User", [u["username"] for u in users], key="target_reset_user")
@@ -981,4 +928,4 @@ if st.session_state["logged_in"]:
                         admin_set_password(target_user, reset_pass)
                         st.success(f"Password updated for '{target_user}'.")
 
-st.markdown("---\n**Disclaimer:** probabilistic model estimates for entertainment/analysis only. Not financial or betting advice.")
+st.markdown("---\n**Disclaimer:** probabilistic model estimates for entertainment/analysis only. Not financial or betting advice. Only bet what you can afford to lose.")
