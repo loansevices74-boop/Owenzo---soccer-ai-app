@@ -1,6 +1,6 @@
 """
 Owenzo Football AI (public) + Owenzõ Soccer AI Vip-01 (VIP tabs 4-7)
-FINAL v3: Tab5 AUTO 2-odds, best market per match (1X2/O1.5/DC), 2-6 legs, multi-league
+FINAL v4: 7-Day Accumulator = ALL qualifying picks (unlimited legs, no odds cap)
 """
 import os, math, hashlib, secrets, sqlite3, itertools
 from datetime import datetime
@@ -27,6 +27,7 @@ ODDS_SPORT_KEYS = {"English Premier League": "soccer_epl", "La Liga": "soccer_sp
 LEAGUE_IDS = {"English Premier League": "4328", "La Liga": "4335", "Serie A": "4332",
               "Bundesliga": "4331", "Ligue 1": "4334"}
 LEAGUES = list(LEAGUE_IDS.keys())
+TOP_LEAGUE_NAMES = set(LEAGUES)
 
 def _as_list(v):
     return v if isinstance(v, list) else []
@@ -319,6 +320,9 @@ def _poisson_joint(mu_home, mu_away, max_goals=8):
     return {(i, j): _poisson_pmf(i, mu_home) * _poisson_pmf(j, mu_away)
             for i in range(max_goals + 1) for j in range(max_goals + 1)}
 
+def p_over15(probs):
+    return sum(p for (h, a), p in probs.items() if h + a >= 2)
+
 def _form_streak(form):
     if not form:
         return 0.0
@@ -358,10 +362,6 @@ def compute_match_signals(home, away, league_avg=1.35):
                         "Over 1.5": p_over15(probs),
                         "1X": p_home + p_draw, "X2": p_away + p_draw, "12": p_home + p_away}}
 
-def p_over15(probs):
-    return sum(p for (h, a), p in probs.items() if h + a >= 2)
-
-# ---------------- MULTI-MARKET BEST PICK ----------------
 def best_market_pick(signals):
     markets = signals.get("markets", {})
     if not markets:
@@ -517,6 +517,51 @@ def daily_board():
     rows.sort(key=lambda r: (r["Date"] or "9999", -int(r["Confidence"][:-1])))
     picks.sort(key=lambda p: -p["confidence"])
     return rows, picks
+
+# ---------------- 7-DAY AUTO SLIP (Tab 1) — UNLIMITED legs & odds ----------------
+@st.cache_data(ttl=6 * 3600)
+def weekly_slip_board():
+    from datetime import timedelta as _td
+    rows = []; acc_picks = []
+    for off in range(7):
+        d = (datetime.utcnow() + _td(days=off)).strftime("%Y-%m-%d")
+        evs = _as_list((_api_get(API_BASE, "eventsday.php", {"d": d, "s": "Soccer"}) or {}).get("events"))
+        evs_sorted = sorted(evs, key=lambda e: 0 if isinstance(e, dict) and (e.get("strLeague") in TOP_LEAGUE_NAMES) else 1)
+        day_picks = []; cache = {}
+        for e in evs_sorted[:14]:
+            if not isinstance(e, dict):
+                continue
+            home, away = e.get("strHomeTeam"), e.get("strAwayTeam")
+            lg = e.get("strLeague") or ""
+            if not home or not away:
+                continue
+            sig, passed, _ = _analyze(home, away, cache)
+            if sig["confidence"] < 0.55:
+                continue
+            if sig["outcome"] in ("Home", "Draw", "Away") and not passed:
+                continue
+            odds = _estimate_odds_from_prob(sig["market_prob"])
+            day_picks.append({"Date": d, "League": lg, "Match": f"{home} vs {away}",
+                              "Pick": sig["outcome"], "Confidence": sig["confidence"], "Odds": odds})
+        day_picks.sort(key=lambda p: -p["confidence"])
+        for p in day_picks[:2]:
+            rows.append({"Date": p["Date"], "League": p["League"], "Match": p["Match"],
+                         "Pick": p["Pick"], "Confidence": f"{p['Confidence']*100:.0f}%",
+                         "Odds": f"{p['Odds']:.2f}"})
+            acc_picks.append(p)
+    if not rows:
+        return None
+    # UNLIMITED legs, UNLIMITED combined odds — every qualifying pick joins
+    acc_picks.sort(key=lambda p: (-p["Confidence"]))
+    legs = acc_picks
+    comb = 1.0
+    for p in legs:
+        comb *= p["Odds"]
+    acc = None
+    if legs:
+        acc = {"legs": legs, "combined_odds": round(comb, 2),
+               "avg_confidence": sum(p["Confidence"] for p in legs) / len(legs)}
+    return {"rows": rows, "acc": acc}
 
 # ---------------- AUTO 2-ODDS (Tab 5): 2-6 legs, multi-league ----------------
 def build_target_odds(picks, target=2.0, lo=1.8, hi=2.2, max_legs=6):
@@ -721,6 +766,17 @@ with tab_predict:
                 st.success("📥 Slip auto-recorded to Tracker & ROI.")
         else:
             st.info("No picks passed the fact-check threshold today.")
+
+    st.markdown("### 📅 7-Day Auto Slip (best picks for the whole week)")
+    st.caption("Top 1-2 highest-confidence picks per day for the next 7 days (top leagues prioritized). The 7-Day Accumulator includes ALL qualifying picks — unlimited legs, no odds cap. Refreshes every 6 hours.")
+    week = weekly_slip_board()
+    if week:
+        st.markdown(md_table(pd.DataFrame(week["rows"])))
+        if week["acc"]:
+            acc = week["acc"]
+            st.success(f"**7-Day Accumulator:** {len(acc['legs'])} legs (ALL qualifying picks) | **Combined odds: {acc['combined_odds']}** | Avg confidence: {acc['avg_confidence']*100:.0f}%")
+    else:
+        st.info("No qualifying picks in the next 7 days yet.")
     st.markdown("---\n*Confidence is a model estimate capped at 78-90% — not a guarantee.*")
 
 # ---- TAB 2 (PUBLIC) ----
